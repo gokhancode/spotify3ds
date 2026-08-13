@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 
+#include "spotify/lyrics.h"
 #include "spotify/player.h"
 #include "spotify/recents.h"
 #include "spotify/tracks.h"
@@ -124,6 +125,36 @@ typedef struct {
 unsigned worker_request_tracks(const collection_item *collection, int offset);
 void     worker_cancel_tracks(void);
 void     worker_get_tracks(worker_tracks_snapshot *out);
+
+/* --- lyrics -----------------------------------------------------------
+ * Fetched from lrclib.net (not Spotify - the Web API has no lyrics), so this is
+ * independent of the player token. Same newest-request-wins generation scheme
+ * as tracks: the render loop asks when the lyrics view opens or the track
+ * changes, and reads the snapshot each frame. */
+
+typedef enum {
+	LYR_IDLE = 0,
+	LYR_LOADING,
+	LYR_READY, /* done trying; check `result` for OK / instrumental / none */
+	LYR_ERROR, /* transport failure - offer a retry */
+} lyrics_load_state;
+
+typedef struct {
+	lyrics_doc        doc;
+	lyrics_load_state state;
+	lyrics_result     result;
+	unsigned          generation;
+	char              track_uri[128]; /* the track this request was issued for */
+	char              error[160];     /* human-readable status for the UI */
+} worker_lyrics_snapshot;
+
+/* Queue a lyrics fetch for the given track metadata. track_uri is carried
+ * through so the UI can tell whether the ready lyrics still match what is
+ * playing. Returns the request generation. */
+unsigned worker_request_lyrics(const char *track, const char *artist,
+                               const char *album, long duration_ms,
+                               const char *track_uri);
+void     worker_get_lyrics(worker_lyrics_snapshot *out);
 
 /* --- album art -------------------------------------------------------
  * Fetching and decoding art costs ~1.5s, almost all of it network. Doing that

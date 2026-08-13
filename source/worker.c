@@ -8,6 +8,7 @@
 #include "spotify/art.h"
 #include "spotify/artcache.h"
 #include "spotify/auth.h"
+#include "spotify/lyrics.h"
 #include "spotify/recents.h"
 #include "spotify/tracks.h"
 #include "testlog.h"
@@ -114,6 +115,20 @@ static bool                   s_tracks_pending;
 static unsigned               s_tracks_generation;
 static worker_tracks_snapshot s_tracks;
 
+typedef struct {
+	char     track[LYRICS_TEXT_MAX];
+	char     artist[LYRICS_TEXT_MAX];
+	char     album[LYRICS_TEXT_MAX];
+	long     duration_ms;
+	char     track_uri[128];
+	unsigned generation;
+} lyrics_request;
+
+static lyrics_request         s_lyrics_want;
+static bool                   s_lyrics_pending;
+static unsigned               s_lyrics_generation;
+static worker_lyrics_snapshot s_lyrics;
+
 static void set_status(const char *s)
 {
 	LightLock_Lock(&s_lock);
@@ -137,6 +152,7 @@ static void do_recents(void);
 static void do_playlists(void);
 static void do_albums(void);
 static void do_tracks(void);
+static void do_lyrics(void);
 static void do_thumbs(void);
 static void do_current_metadata(void);
 
@@ -466,6 +482,7 @@ static void worker_main(void *arg)
 		 * picked up in the same iteration rather than 100ms later. */
 		do_art();
 		do_tracks();
+		do_lyrics();
 
 		/* Lists last: the cover the user is looking at matters more than the
 		 * shelf behind it. Playlists before recents so the name cache is warm
@@ -1089,6 +1106,106 @@ static void do_tracks(void)
 		tl_log("tracks offset=%d: %s (%s)", request.offset,
 		       player_result_str(pr), err);
 	free(page);
+}
+
+unsigned worker_request_lyrics(const char *track, const char *artist,
+                               const char *album, long duration_ms,
+                               const char *track_uri)
+{
+	if (!track || !track[0] || !artist || !artist[0])
+		return 0;
+
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	const unsigned generation = ++s_lyrics_generation;
+	snprintf(s_lyrics_want.track, sizeof s_lyrics_want.track, "%s", track);
+	snprintf(s_lyrics_want.artist, sizeof s_lyrics_want.artist, "%s", artist);
+	snprintf(s_lyrics_want.album, sizeof s_lyrics_want.album, "%s",
+	         album ? album : "");
+	s_lyrics_want.duration_ms = duration_ms;
+	snprintf(s_lyrics_want.track_uri, sizeof s_lyrics_want.track_uri, "%s",
+	         track_uri ? track_uri : "");
+	s_lyrics_want.generation = generation;
+	s_lyrics_pending = true;
+
+	/* Publish the loading state immediately so the view shows a spinner rather
+	 * than the previous track's lyrics while the fetch is in flight. */
+	memset(&s_lyrics.doc, 0, sizeof s_lyrics.doc);
+	s_lyrics.state = LYR_LOADING;
+	s_lyrics.result = LYRICS_OK;
+	s_lyrics.generation = generation;
+	s_lyrics.error[0] = '\0';
+	snprintf(s_lyrics.track_uri, sizeof s_lyrics.track_uri, "%s",
+	         track_uri ? track_uri : "");
+	LightLock_Unlock(&s_lock);
+	return generation;
+}
+
+void worker_get_lyrics(worker_lyrics_snapshot *out)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	*out = s_lyrics;
+	LightLock_Unlock(&s_lock);
+}
+
+static void do_lyrics(void)
+{
+	lyrics_request req;
+	LightLock_Lock(&s_lock);
+	const bool pending = s_lyrics_pending;
+	if (pending) {
+		req = s_lyrics_want;
+		s_lyrics_pending = false;
+		s_busy = true;
+	}
+	LightLock_Unlock(&s_lock);
+	if (!pending)
+		return;
+
+	/* Heap, not stack: lyrics_doc is tens of KB and the worker's 96KB stack is
+	 * already shared with a TLS handshake. */
+	lyrics_doc *doc = malloc(sizeof *doc);
+	if (!doc) {
+		LightLock_Lock(&s_lock);
+		if (req.generation == s_lyrics_generation) {
+			s_lyrics.state = LYR_ERROR;
+			s_lyrics.result = LYRICS_ERR;
+			snprintf(s_lyrics.error, sizeof s_lyrics.error, "Out of memory");
+		}
+		LightLock_Unlock(&s_lock);
+		return;
+	}
+	memset(doc, 0, sizeof *doc);
+
+	char err[256] = "";
+	const lyrics_result lr = lyrics_fetch(req.track, req.artist, req.album,
+	                                      req.duration_ms, doc, err, sizeof err);
+
+	LightLock_Lock(&s_lock);
+	/* Drop a result the user has already navigated away from. */
+	if (req.generation == s_lyrics_generation) {
+		s_lyrics.result = lr;
+		s_lyrics.generation = req.generation;
+		if (lr == LYRICS_OK) {
+			s_lyrics.doc = *doc;
+			s_lyrics.state = LYR_READY;
+			s_lyrics.error[0] = '\0';
+		} else {
+			s_lyrics.doc.count = 0;
+			s_lyrics.state = (lr == LYRICS_ERR) ? LYR_ERROR : LYR_READY;
+			snprintf(s_lyrics.error, sizeof s_lyrics.error, "%s",
+			         lr == LYRICS_INSTRUMENTAL ? "Instrumental"
+			         : lr == LYRICS_NONE       ? "No lyrics found"
+			         : err[0]                  ? err
+			                                   : "Lyrics unavailable");
+		}
+	}
+	LightLock_Unlock(&s_lock);
+
+	if (lr != LYRICS_OK && lr != LYRICS_NONE && lr != LYRICS_INSTRUMENTAL)
+		tl_log("lyrics: %s", err);
+	free(doc);
 }
 
 void worker_play_context(const char *context_uri)

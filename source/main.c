@@ -14,6 +14,8 @@
 #include "spotify/player.h"
 #include "testlog.h"
 #include "ui/screen_list.h"
+#include "ui/screen_lyrics.h"
+#include "ui/screen_lyrics3d.h"
 #include "ui/screen_player.h"
 #include "ui/screen_tracks.h"
 #include "ui/screen_top.h"
@@ -82,7 +84,7 @@ static album_art g_art;
 static bool g_art_hidden;
 
 /* Which view the bottom screen is showing. */
-typedef enum { VIEW_PLAYER = 0, VIEW_LIST, VIEW_TRACKS } bottom_view;
+typedef enum { VIEW_PLAYER = 0, VIEW_LIST, VIEW_TRACKS, VIEW_LYRICS } bottom_view;
 static bottom_view g_view;
 static bottom_view g_tracks_return_view = VIEW_LIST;
 static float       g_list_scroll;
@@ -101,6 +103,19 @@ static unsigned              g_tracks_applied_generation;
 /* -2: leave unselected, -1: select last row, otherwise page-local index. */
 static int                   g_tracks_select_on_load = -2;
 
+/* Lyrics view. The snapshot is large, so file scope like the other list buffers.
+ * g_lyrics_req_uri is the track we last asked lrclib about, so a track change
+ * (or a retry that clears it) triggers a fresh fetch. While g_lyrics_manual_until
+ * is in the future the user is scrolling by hand and auto-follow stands down. */
+static worker_lyrics_snapshot g_lyrics_buf;
+static float                  g_lyrics_scroll;
+static float                  g_lyrics_velocity;
+static char                   g_lyrics_req_uri[128];
+static u64                    g_lyrics_manual_until;
+/* Present the lyrics on the top screen as a hovering 3D stack instead of the
+ * flat bottom-screen list. The flat list stays on the bottom for scrolling. */
+static bool                   g_lyrics_3d;
+
 /* List momentum is measured in pixels per frame. Keep it deliberately short:
  * this is a 240px resistive screen, so a phone-style multi-screen fling would
  * make the rows harder rather than easier to control. */
@@ -112,6 +127,8 @@ static int                   g_tracks_select_on_load = -2;
 #define VOLUME_STEP         5
 #define VOLUME_OVERLAY_MS   1100
 #define VOLUME_OPT_MS       12000
+#define LYRICS_MANUAL_MS    5000  /* auto-follow pauses this long after a drag */
+#define LYRICS_SCROLL_STEP  48.0f
 
 /* True when running under the headless harness, which needs the app to quit by
  * itself. On a real console the app must stay up until the user exits. */
@@ -608,8 +625,12 @@ int main(int argc, char **argv)
 	tl_set_timing(g_smoketest);
 
 
-	C3D_RenderTarget *top    = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
-	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
+	C3D_RenderTarget *top       = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
+	C3D_RenderTarget *top_right = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
+	C3D_RenderTarget *bottom    = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
+	/* Stereo is toggled on only while the 3D lyrics view is up, so every other
+	 * screen keeps rendering a single eye. */
+	bool three_d_on = false;
 
 	C2D_TextBuf textbuf = C2D_TextBufNew(TEXTBUF_GLYPHS);
 
@@ -674,12 +695,20 @@ int main(int argc, char **argv)
 		hidScanInput();
 		const u32 keys_down   = hidKeysDown();
 		const u32 keys_repeat = hidKeysDownRepeat();
+		const u32 keys_held   = hidKeysHeld();
 		if (keys_down & KEY_START)
 			break;
 		/* Y hides the cover. The top screen has no touch digitizer, so the
-		 * art-off layout needs a physical button. */
-		if (keys_down & KEY_Y)
+		 * art-off layout needs a physical button. In the lyrics view Y is
+		 * repurposed to toggle the 3D top-screen presentation instead. */
+		if ((keys_down & KEY_Y) && g_view != VIEW_LYRICS)
 			g_art_hidden = !g_art_hidden;
+
+		/* Hold both shoulders and tap Up to toggle the synced-lyrics view.
+		 * L+R held together is already a deliberate no-op for volume, so this
+		 * chord hijacks no existing control. */
+		const bool lyrics_combo = (keys_held & KEY_L) && (keys_held & KEY_R) &&
+		                          (keys_down & KEY_DUP);
 
 		/* Exercise the art-hidden layout headlessly too, so 2A cannot rot
 		 * unnoticed: flip it for a stretch in the middle of a smoketest. */
@@ -752,7 +781,7 @@ int main(int argc, char **argv)
 		const bottom_view input_view = g_view;
 
 		const u32 volume_keys = keys_repeat & (KEY_L | KEY_R);
-		if (volume_keys) {
+		if (volume_keys && !lyrics_combo) {
 			g_volume_overlay_until = osGetTime() + VOLUME_OVERLAY_MS;
 			const bool supported = snap.have_state &&
 			                       snap.state.supports_volume &&
@@ -1172,6 +1201,69 @@ int main(int argc, char **argv)
 			}
 		}
 
+		/* --- lyrics view -------------------------------------------- */
+		if (input_view == VIEW_PLAYER && lyrics_combo) {
+			g_view                = VIEW_LYRICS;
+			g_lyrics_scroll       = 0.0f;
+			g_lyrics_velocity     = 0.0f;
+			g_lyrics_manual_until = 0;
+			g_lyrics_req_uri[0]   = '\0'; /* force a fetch for the current track */
+		}
+
+		if (input_view == VIEW_LYRICS) {
+			worker_get_lyrics(&g_lyrics_buf);
+
+			/* Y (or the header pill) sends the lyrics to the top screen in 3D. */
+			if ((keys_down & KEY_Y) || touch.clicked == LYRICS_BTN_3D)
+				g_lyrics_3d = !g_lyrics_3d;
+
+			/* Playback stays controllable while reading. */
+			if (keys_down & KEY_A) {
+				opt_set(&g_opt_play, !playing);
+				worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
+			}
+			if (keys_down & KEY_DRIGHT)
+				worker_post(CMD_NEXT, 0);
+			if (keys_down & KEY_DLEFT)
+				worker_post(CMD_PREV, 0);
+
+			if ((keys_down & KEY_B) || lyrics_combo ||
+			    touch.clicked == LYRICS_BTN_BACK) {
+				g_view = VIEW_PLAYER;
+			} else if ((touch.clicked == LYRICS_BTN_RETRY ||
+			            (keys_down & KEY_X)) &&
+			           g_lyrics_buf.state == LYR_ERROR) {
+				g_lyrics_req_uri[0] = '\0'; /* re-issue the fetch below */
+			}
+
+			/* Manual scroll (D-pad without shoulders, or drag) suspends the
+			 * auto-follow for a few seconds. */
+			const u32 nav = keys_repeat & (KEY_UP | KEY_DOWN);
+			if (nav && !(keys_held & (KEY_L | KEY_R))) {
+				g_lyrics_scroll += (nav & KEY_UP) ? -LYRICS_SCROLL_STEP
+				                                  : LYRICS_SCROLL_STEP;
+				g_lyrics_manual_until = osGetTime() + LYRICS_MANUAL_MS;
+			}
+			if (touch.pressed)
+				g_lyrics_velocity = 0.0f;
+			if (touch.down && touch.dragging) {
+				const float delta = -(float)touch.dy;
+				g_lyrics_scroll += delta;
+				g_lyrics_velocity = g_lyrics_velocity * 0.25f + delta * 0.75f;
+				if (g_lyrics_velocity > LIST_FLING_MAX)
+					g_lyrics_velocity = LIST_FLING_MAX;
+				if (g_lyrics_velocity < -LIST_FLING_MAX)
+					g_lyrics_velocity = -LIST_FLING_MAX;
+				g_lyrics_manual_until = osGetTime() + LYRICS_MANUAL_MS;
+			} else if (!touch.down) {
+				g_lyrics_scroll += g_lyrics_velocity;
+				g_lyrics_velocity *= LIST_FLING_FRICTION;
+				if (g_lyrics_velocity > -LIST_FLING_STOP &&
+				    g_lyrics_velocity < LIST_FLING_STOP)
+					g_lyrics_velocity = 0.0f;
+			}
+		}
+
 		if (input_view == VIEW_PLAYER &&
 		    (touch.clicked == BTN_SHELF_ALL || (keys_down & KEY_X))) {
 			g_view        = VIEW_LIST;
@@ -1239,6 +1331,45 @@ int main(int argc, char **argv)
 				}
 				default:
 					break;
+			}
+		}
+
+		/* --- lyrics fetch + auto-follow -------------------------------- */
+		if (g_view == VIEW_LYRICS) {
+			worker_get_lyrics(&g_lyrics_buf);
+
+			/* (Re)fetch when the track changes, or a retry cleared the marker. */
+			if (snap.have_state && snap.state.track_uri[0] &&
+			    strcmp(snap.state.track_uri, g_lyrics_req_uri) != 0) {
+				worker_request_lyrics(snap.state.track, snap.state.artist,
+				                      snap.state.album, snap.state.duration_ms,
+				                      snap.state.track_uri);
+				snprintf(g_lyrics_req_uri, sizeof g_lyrics_req_uri, "%s",
+				         snap.state.track_uri);
+			}
+
+			/* Ease the current line toward the centre unless the user just
+			 * scrolled by hand. progress is the same interpolated position the
+			 * scrubber uses, so the highlight tracks the audio at 60fps. */
+			if (g_lyrics_buf.doc.synced &&
+			    osGetTime() >= g_lyrics_manual_until) {
+				const int hl = lyrics_index_at(&g_lyrics_buf.doc, progress);
+				if (hl >= 0) {
+					const float target = screen_lyrics_center_scroll(
+					    g_lyrics_buf.doc.count, hl);
+					g_lyrics_scroll += (target - g_lyrics_scroll) * 0.15f;
+				}
+			}
+
+			const float maxs =
+			    screen_lyrics_max_scroll(g_lyrics_buf.doc.count);
+			if (g_lyrics_scroll < 0.0f) {
+				g_lyrics_scroll = 0.0f;
+				g_lyrics_velocity = 0.0f;
+			}
+			if (g_lyrics_scroll > maxs) {
+				g_lyrics_scroll = maxs;
+				g_lyrics_velocity = 0.0f;
 			}
 		}
 
@@ -1644,12 +1775,46 @@ int main(int argc, char **argv)
 		C2D_TextBufClear(textbuf);
 
 		/* --- top screen ------------------------------------------------ */
+		/* Stereoscopic only while the 3D lyrics view is up; gfxSet3D flips on
+		 * the transition so every other screen keeps drawing a single eye. On a
+		 * 2DS the slider reads 0 and the two eyes coincide, which is fine. */
+		const bool draw3d = g_view == VIEW_LYRICS && g_lyrics_3d &&
+		                    g_lyrics_buf.doc.count > 0;
+		if (draw3d != three_d_on) {
+			gfxSet3D(draw3d);
+			three_d_on = draw3d;
+		}
+		const float slider3d = draw3d ? osGet3DSliderState() : 0.0f;
+
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
-		C2D_TargetClear(top, C2D_Color32(0, 0, 0, 0xFF));
-		C2D_SceneBegin(top);
+		for (int e = 0; e < (draw3d ? 2 : 1); e++) {
+			C3D_RenderTarget *tgt = e == 0 ? top : top_right;
+			C2D_TargetClear(tgt, C2D_Color32(0, 0, 0, 0xFF));
+			C2D_SceneBegin(tgt);
 
-		{
+			if (draw3d) {
+				int center = g_lyrics_buf.doc.synced
+				                 ? lyrics_index_at(&g_lyrics_buf.doc, progress)
+				                 : screen_lyrics_scroll_center_index(
+				                       g_lyrics_scroll);
+				const bool active =
+				    g_lyrics_buf.doc.synced ? center >= 0 : true;
+				if (center < 0)
+					center = 0;
+				const screen_lyrics3d_args l3 = {
+					.buf          = textbuf,
+					.doc          = &g_lyrics_buf.doc,
+					.center       = center,
+					.active       = active,
+					.depth        = slider3d,
+					.eye          = e == 0 ? -1.0f : 1.0f,
+					.animation_ms = (unsigned)osGetTime(),
+				};
+				screen_lyrics3d_draw(&l3);
+				continue;
+			}
+
 			const char *hint = NULL;
 			if (snap.fatal)
 				hint = snap.status_hint;
@@ -1721,6 +1886,26 @@ int main(int argc, char **argv)
 				.armed_id = g_tracks_armed,
 			};
 			screen_tracks_draw(&ta);
+		} else if (g_view == VIEW_LYRICS) {
+			worker_get_lyrics(&g_lyrics_buf);
+			const int hl = g_lyrics_buf.doc.synced
+			                   ? lyrics_index_at(&g_lyrics_buf.doc, progress)
+			                   : -1;
+			const screen_lyrics_args la = {
+				.buf        = textbuf,
+				.tb         = &g_tb,
+				.doc        = &g_lyrics_buf.doc,
+				.track      = snap.have_state ? snap.state.track : NULL,
+				.back_label = "Player",
+				.status     = g_lyrics_buf.error[0] ? g_lyrics_buf.error : NULL,
+				.loading    = g_lyrics_buf.state == LYR_LOADING,
+				.error      = g_lyrics_buf.state == LYR_ERROR,
+				.show3d     = g_lyrics_3d,
+				.highlight  = hl,
+				.scroll     = g_lyrics_scroll,
+				.pressed_id = touch.down ? touch.press_id : -1,
+			};
+			screen_lyrics_draw(&la);
 		} else {
 			screen_player_args pa = {
 				.buf         = textbuf,

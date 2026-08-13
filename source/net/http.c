@@ -185,7 +185,11 @@ static bool http_exchange(const char *host, const char *method,
 
 	/* --- request ---------------------------------------------------- */
 	growbuf req = {0};
-	char    line[512];
+	/* 1KB, not 512: Spotify paths are short, but lrclib lyrics lookups carry
+	 * URL-encoded track/artist/album in the query and can approach ~700 bytes.
+	 * snprintf truncates safely, but a truncated request line is a broken
+	 * request, so give the whole first-header block room. */
+	char    line[1024];
 
 	/* Keep-alive is the whole point: a fresh TLS handshake to Spotify costs
 	 * 700-1500ms and used to be paid on every request. */

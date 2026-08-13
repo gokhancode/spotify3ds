@@ -23,6 +23,22 @@ https://github.com/user-attachments/assets/de96f312-1107-42eb-a012-5f5bdfdea7f2
   <img src="assets/volume-overlay.png" alt="Spotify3DS volume overlay" width="23%">
 </p>
 
+## Lyrics (this fork)
+
+This fork adds **time-synced lyrics** on top of upstream
+[avncharlie/spotify3ds](https://github.com/avncharlie/spotify3ds).
+
+- Hold **L + R** and tap **Up** to open the lyrics view on the bottom screen. It
+  auto-scrolls in time with the track; drag or use the D-pad to scroll by hand.
+- Press **Y** (or tap the on-screen **3D** pill) to move the lyrics to the top
+  screen as a hovering **3D** stack — the current line floats in front while the
+  previous/next lines sit behind it. On a 3DS, push the depth slider up.
+- **B** (or the same L+R+Up chord) closes the view.
+
+Lyrics come from the open [lrclib.net](https://lrclib.net) API, since Spotify's
+Web API exposes none; coverage depends on that database, and instrumental or
+unmatched tracks say so. No extra setup — it reuses your existing `creds.cfg`.
+
 ## Installation
 
 You need Spotify Premium, a homebrew-enabled 3DS, Python 3 on your computer,
