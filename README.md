@@ -39,6 +39,11 @@ Lyrics come from the open [lrclib.net](https://lrclib.net) API, since Spotify's
 Web API exposes none; coverage depends on that database, and instrumental or
 unmatched tracks say so. No extra setup — it reuses your existing `creds.cfg`.
 
+Scan this in **FBI → Remote Install → Scan QR Code** to install the latest CIA
+of this fork directly:
+
+<a href="https://github.com/gokhancode/spotify3ds/releases/latest/download/Spotify3DS.cia"><img src="assets/lyrics-release-qr.png" alt="QR code for the latest Spotify3DS CIA" width="240"></a>
+
 ## Installation
 
 You need Spotify Premium, a homebrew-enabled 3DS, Python 3 on your computer,
