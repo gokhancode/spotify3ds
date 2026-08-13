@@ -22,7 +22,9 @@ enum {
 	BTN_REPEAT,
 	BTN_SCRUB,
 	BTN_SHELF_ALL,
-	BTN_SHELF0, /* .. BTN_SHELF0 + SHELF_TILES - 1 */
+	BTN_LYRICS,    /* open the lyrics list on the bottom screen */
+	BTN_LYRICS_3D, /* toggle the hovering lyrics on the top screen */
+	BTN_SHELF0,    /* .. BTN_SHELF0 + SHELF_TILES - 1 */
 };
 
 #define SHELF_TILES 4
@@ -42,6 +44,7 @@ typedef struct {
 	 * a pressed appearance. */
 	int  pressed_id;
 	bool scrubbing;
+	bool top_lyrics; /* the top-screen 3D lyrics overlay is currently on */
 
 	/* Shelf art, NULL where not yet loaded. */
 	const C2D_Image *shelf[SHELF_TILES];

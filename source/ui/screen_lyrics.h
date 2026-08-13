@@ -9,12 +9,14 @@ enum {
 	LYRICS_BTN_BACK = 900,
 	LYRICS_BTN_RETRY,
 	LYRICS_BTN_3D,
+	LYRICS_ROW0 = 950, /* per-line tap-to-seek: LYRICS_ROW0 + line index */
 };
 
 typedef struct {
 	C2D_TextBuf       buf;
 	touch_builder    *tb;
 	const lyrics_doc *doc;
+	const C2D_Image  *cover;      /* album art for the blurred backdrop, or NULL */
 	const char       *track;      /* header title; falls back to doc->track */
 	const char       *back_label; /* left header label, e.g. "Player" */
 	const char       *status;     /* message when there are no lines to show */

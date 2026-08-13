@@ -10,7 +10,8 @@
 #define HEADER_H    30.0f
 #define CONTENT_TOP (HEADER_H + 4.0f)
 #define VIEWPORT_H  (BOT_H - CONTENT_TOP)
-#define LINE_H      26.0f
+#define LINE_H      40.0f /* fits up to two wrapped text lines per lyric */
+#define TEXT_MAXW   (BOT_W - PAD_X - 14.0f)
 #define PAD_X       16.0f
 #define IND_X       314.0f
 #define IND_W       3.0f
@@ -18,9 +19,11 @@
 #define CLR_HEADER C2D_Color32(0x11, 0x11, 0x11, 0xFF)
 #define CLR_NAME   C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF)
 #define CLR_ACTIVE C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF)
-#define CLR_PAST   C2D_Color32(0x59, 0x59, 0x59, 0xFF)
-#define CLR_FUTURE C2D_Color32(0x9A, 0x9A, 0x9A, 0xFF)
-#define CLR_PLAIN  C2D_Color32(0xC2, 0xC2, 0xC2, 0xFF)
+#define CLR_PAST   C2D_Color32(0x74, 0x74, 0x74, 0xFF)
+#define CLR_FUTURE C2D_Color32(0xC0, 0xC0, 0xC0, 0xFF)
+#define CLR_PLAIN  C2D_Color32(0xCE, 0xCE, 0xCE, 0xFF)
+#define CLR_SHADOW C2D_Color32(0x00, 0x00, 0x00, 0xC0)
+#define CLR_ROW_PRESS C2D_Color32(0xFF, 0xFF, 0xFF, 0x14)
 #define CLR_SUB    C2D_Color32(0x8A, 0x8A, 0x8A, 0xFF)
 #define CLR_GREEN  C2D_Color32(0x1D, 0xB9, 0x54, 0xFF)
 #define CLR_GREEN_PRESS C2D_Color32(0x28, 0xD8, 0x68, 0xFF)
@@ -65,38 +68,55 @@ static void rounded_rect(float x, float y, float w, float h, float r, u32 clr)
 	ui_disc(x + w - r, y + h - r, r, clr);
 }
 
+/* One lyric line, word-wrapped to at most two rows and vertically centred in
+ * its slot. A shadow under each row keeps it legible over a bright cover. */
+static void draw_wrapped(C2D_TextBuf buf, const char *text, float row_top,
+                         float row_h, u32 clr)
+{
+	char lines[2][128];
+	const int   n = ui_wrap(text, TY_ARTIST, TEXT_MAXW, lines, 2);
+	const float lh = ui_px(TY_ARTIST) + 4.0f;
+	float       top = row_top + (row_h - (float)n * lh) / 2.0f;
+
+	for (int k = 0; k < n; k++) {
+		const float base = ui_baseline(top + (float)k * lh, TY_ARTIST);
+		ui_text(buf, lines[k], PAD_X + 1.0f, base + 1.0f, TY_ARTIST, TEXT_MAXW,
+		        CLR_SHADOW);
+		ui_text(buf, lines[k], PAD_X, base, TY_ARTIST, TEXT_MAXW, clr);
+	}
+}
+
 static void draw_lines(const screen_lyrics_args *a)
 {
 	const lyrics_doc *d = a->doc;
-	const float role_h = ui_px(TY_ARTIST);
-	const float maxw = BOT_W - 2.0f * PAD_X;
 
 	for (int i = 0; i < d->count; i++) {
 		const float top = CONTENT_TOP - a->scroll + (float)i * LINE_H;
 		if (top + LINE_H <= CONTENT_TOP || top >= BOT_H)
 			continue; /* fully outside the body */
 
-		u32 clr;
-		if (!d->synced) {
-			clr = CLR_PLAIN;
-		} else if (i == a->highlight) {
-			clr = CLR_ACTIVE;
-		} else if (a->highlight >= 0 && i < a->highlight) {
-			clr = CLR_PAST;
-		} else {
-			clr = CLR_FUTURE;
-		}
+		/* Clipped hit rect so any line can be tapped to seek to its time. */
+		const float ht = top < CONTENT_TOP ? CONTENT_TOP : top;
+		const float hb = top + LINE_H > BOT_H ? BOT_H : top + LINE_H;
+		if (hb - ht > 6.0f)
+			tb_add(a->tb, 0.0f, ht, BOT_W - 6.0f, hb - ht, LYRICS_ROW0 + i);
 
-		if (d->synced && i == a->highlight)
-			C2D_DrawRectSolid(0.0f, top + 3.0f, 0.0f, 3.0f, LINE_H - 6.0f,
+		const bool active = d->synced && i == a->highlight;
+		if (a->pressed_id == LYRICS_ROW0 + i)
+			C2D_DrawRectSolid(0.0f, ht, 0.0f, BOT_W, hb - ht, CLR_ROW_PRESS);
+		if (active)
+			C2D_DrawRectSolid(0.0f, top + 4.0f, 0.0f, 3.0f, LINE_H - 8.0f,
 			                  CLR_GREEN);
 
 		const char *text = d->lines[i].text;
 		if (!text[0])
 			continue; /* blank spacer line: keep its slot, draw nothing */
-		const float baseline = ui_baseline(top + (LINE_H - role_h) / 2.0f,
-		                                    TY_ARTIST);
-		ui_text(a->buf, text, PAD_X, baseline, TY_ARTIST, maxw, clr);
+
+		const u32 clr = !d->synced         ? CLR_PLAIN
+		                : active            ? CLR_ACTIVE
+		                : i < a->highlight  ? CLR_PAST
+		                                    : CLR_FUTURE;
+		draw_wrapped(a->buf, text, top, LINE_H, clr);
 	}
 
 	/* Scroll indicator, matching the tracks view. */
@@ -135,6 +155,10 @@ static void draw_status(const screen_lyrics_args *a)
 
 void screen_lyrics_draw(const screen_lyrics_args *a)
 {
+	/* Dimmed album cover behind everything; legibility handled by the scrim
+	 * plus per-line shadows. */
+	ui_backdrop(a->cover, BOT_W, BOT_H);
+
 	if (a->doc && a->doc->count > 0)
 		draw_lines(a);
 	else

@@ -153,6 +153,84 @@ float ui_text_width(C2D_TextBuf buf, const char *s, type_role r)
 	return measure_width(buf, s, r);
 }
 
+int ui_wrap(const char *s, type_role r, float maxw, char out[][128],
+            int max_lines)
+{
+	int n = 0;
+	char cur[128];
+	cur[0] = '\0';
+
+	const char *p = s ? s : "";
+	while (*p && n < max_lines) {
+		while (*p == ' ')
+			p++;
+		if (!*p)
+			break;
+
+		const char *ws = p;
+		while (*p && *p != ' ')
+			p++;
+		int wl = (int)(p - ws);
+		if (wl > 127)
+			wl = 127;
+		char word[128];
+		memcpy(word, ws, (size_t)wl);
+		word[wl] = '\0';
+
+		char cand[256];
+		if (cur[0])
+			snprintf(cand, sizeof cand, "%s %s", cur, word);
+		else
+			snprintf(cand, sizeof cand, "%s", word);
+
+		if (cur[0] && ui_text_width(NULL, cand, r) > maxw) {
+			snprintf(out[n++], 128, "%s", cur);
+			snprintf(cur, sizeof cur, "%s", word);
+		} else {
+			snprintf(cur, sizeof cur, "%s", cand);
+		}
+	}
+
+	if (cur[0] && n < max_lines)
+		snprintf(out[n++], 128, "%s", cur);
+
+	/* Ran out of lines with text left over: glue the remainder onto the last
+	 * line so ui_text truncates it with an ellipsis rather than dropping it. */
+	if (*p && n > 0) {
+		char merged[256];
+		snprintf(merged, sizeof merged, "%s %s", out[n - 1], p);
+		snprintf(out[n - 1], 128, "%s", merged);
+	}
+
+	if (n == 0) {
+		out[0][0] = '\0';
+		n = 1;
+	}
+	return n;
+}
+
+void ui_backdrop(const C2D_Image *img, float w, float h)
+{
+	/* Dark base, so a missing or letterboxed cover never leaves bare panel. */
+	C2D_DrawRectSolid(0.0f, 0.0f, 0.0f, w, h, C2D_Color32(0x0A, 0x0A, 0x0A, 0xFF));
+
+	if (img && img->tex && img->subtex && img->subtex->width &&
+	    img->subtex->height) {
+		const float iw = (float)img->subtex->width;
+		const float ih = (float)img->subtex->height;
+		float scale = w / iw;
+		if (h / ih > scale)
+			scale = h / ih; /* cover, not contain */
+		const float dw = iw * scale;
+		const float dh = ih * scale;
+		C2D_DrawImageAt(*img, (w - dw) / 2.0f, (h - dh) / 2.0f, 0.0f, NULL,
+		                scale, scale);
+		/* Heavy scrim: the cover is decoration, legibility comes first. */
+		C2D_DrawRectSolid(0.0f, 0.0f, 0.0f, w, h,
+		                  C2D_Color32(0x00, 0x00, 0x00, 0xB0));
+	}
+}
+
 void ui_text(C2D_TextBuf buf, const char *s, float x, float y, type_role r,
              float maxw, u32 clr)
 {

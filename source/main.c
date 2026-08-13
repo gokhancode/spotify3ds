@@ -112,9 +112,10 @@ static float                  g_lyrics_scroll;
 static float                  g_lyrics_velocity;
 static char                   g_lyrics_req_uri[128];
 static u64                    g_lyrics_manual_until;
-/* Present the lyrics on the top screen as a hovering 3D stack instead of the
- * flat bottom-screen list. The flat list stays on the bottom for scrolling. */
-static bool                   g_lyrics_3d;
+/* Present the lyrics on the top screen as a hovering 3D stack. Independent of
+ * g_view, so it can be on while the bottom screen shows the player controls or
+ * the flat lyrics list. */
+static bool                   g_top_lyrics;
 
 /* List momentum is measured in pixels per frame. Keep it deliberately short:
  * this is a 240px resistive screen, so a phone-style multi-screen fling would
@@ -1202,20 +1203,26 @@ int main(int argc, char **argv)
 		}
 
 		/* --- lyrics view -------------------------------------------- */
-		if (input_view == VIEW_PLAYER && lyrics_combo) {
+		/* Open the bottom list from the player's LYRICS pill or the L+R+Up
+		 * chord; the top-screen 3D overlay is a separate, independent toggle. */
+		if (input_view == VIEW_PLAYER &&
+		    (lyrics_combo || touch.clicked == BTN_LYRICS)) {
 			g_view                = VIEW_LYRICS;
 			g_lyrics_scroll       = 0.0f;
 			g_lyrics_velocity     = 0.0f;
 			g_lyrics_manual_until = 0;
 			g_lyrics_req_uri[0]   = '\0'; /* force a fetch for the current track */
 		}
+		if (input_view == VIEW_PLAYER && touch.clicked == BTN_LYRICS_3D)
+			g_top_lyrics = !g_top_lyrics;
 
 		if (input_view == VIEW_LYRICS) {
 			worker_get_lyrics(&g_lyrics_buf);
 
-			/* Y (or the header pill) sends the lyrics to the top screen in 3D. */
+			/* Y (or the header pill) toggles the top-screen 3D overlay, which
+			 * stays on independently when you go back to the player. */
 			if ((keys_down & KEY_Y) || touch.clicked == LYRICS_BTN_3D)
-				g_lyrics_3d = !g_lyrics_3d;
+				g_top_lyrics = !g_top_lyrics;
 
 			/* Playback stays controllable while reading. */
 			if (keys_down & KEY_A) {
@@ -1234,6 +1241,20 @@ int main(int argc, char **argv)
 			            (keys_down & KEY_X)) &&
 			           g_lyrics_buf.state == LYR_ERROR) {
 				g_lyrics_req_uri[0] = '\0'; /* re-issue the fetch below */
+			} else if (g_lyrics_buf.doc.synced &&
+			           touch.clicked >= LYRICS_ROW0 &&
+			           touch.clicked < LYRICS_ROW0 + g_lyrics_buf.doc.count) {
+				/* Tap a line to seek the track to its timestamp. */
+				const long t =
+				    g_lyrics_buf.doc.lines[touch.clicked - LYRICS_ROW0].time_ms;
+				if (t >= 0) {
+					worker_post(CMD_SEEK, t);
+					/* Re-base the local clock so the highlight jumps at once,
+					 * the same trick the scrubber uses. */
+					g_base_progress = t;
+					g_base_time = osGetTime();
+					g_lyrics_manual_until = 0;
+				}
 			}
 
 			/* Manual scroll (D-pad without shoulders, or drag) suspends the
@@ -1335,7 +1356,10 @@ int main(int argc, char **argv)
 		}
 
 		/* --- lyrics fetch + auto-follow -------------------------------- */
-		if (g_view == VIEW_LYRICS) {
+		/* Wanted by either surface: the bottom list or the top-screen overlay,
+		 * which can be up while the bottom shows the player. */
+		const bool lyrics_wanted = g_view == VIEW_LYRICS || g_top_lyrics;
+		if (lyrics_wanted) {
 			worker_get_lyrics(&g_lyrics_buf);
 
 			/* (Re)fetch when the track changes, or a retry cleared the marker. */
@@ -1775,11 +1799,10 @@ int main(int argc, char **argv)
 		C2D_TextBufClear(textbuf);
 
 		/* --- top screen ------------------------------------------------ */
-		/* Stereoscopic only while the 3D lyrics view is up; gfxSet3D flips on
-		 * the transition so every other screen keeps drawing a single eye. On a
-		 * 2DS the slider reads 0 and the two eyes coincide, which is fine. */
-		const bool draw3d = g_view == VIEW_LYRICS && g_lyrics_3d &&
-		                    g_lyrics_buf.doc.count > 0;
+		/* Stereoscopic only while the top-lyrics overlay is up; gfxSet3D flips
+		 * on the transition so every other screen keeps drawing a single eye. On
+		 * a 2DS the slider reads 0 and the two eyes coincide, which is fine. */
+		const bool draw3d = g_top_lyrics && g_lyrics_buf.doc.count > 0;
 		if (draw3d != three_d_on) {
 			gfxSet3D(draw3d);
 			three_d_on = draw3d;
@@ -1805,6 +1828,7 @@ int main(int argc, char **argv)
 				const screen_lyrics3d_args l3 = {
 					.buf          = textbuf,
 					.doc          = &g_lyrics_buf.doc,
+					.cover        = g_art.valid ? &g_art.image : NULL,
 					.center       = center,
 					.active       = active,
 					.depth        = slider3d,
@@ -1895,12 +1919,13 @@ int main(int argc, char **argv)
 				.buf        = textbuf,
 				.tb         = &g_tb,
 				.doc        = &g_lyrics_buf.doc,
+				.cover      = g_art.valid ? &g_art.image : NULL,
 				.track      = snap.have_state ? snap.state.track : NULL,
 				.back_label = "Player",
 				.status     = g_lyrics_buf.error[0] ? g_lyrics_buf.error : NULL,
 				.loading    = g_lyrics_buf.state == LYR_LOADING,
 				.error      = g_lyrics_buf.state == LYR_ERROR,
-				.show3d     = g_lyrics_3d,
+				.show3d     = g_top_lyrics,
 				.highlight  = hl,
 				.scroll     = g_lyrics_scroll,
 				.pressed_id = touch.down ? touch.press_id : -1,
@@ -1917,6 +1942,7 @@ int main(int argc, char **argv)
 				.duration_ms = duration,
 				.pressed_id  = touch.down ? touch.press_id : -1,
 				.scrubbing   = g_scrub == SCRUB_DRAGGING,
+				.top_lyrics  = g_top_lyrics,
 				.animation_ms = (unsigned)osGetTime(),
 			};
 

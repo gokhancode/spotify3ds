@@ -40,9 +40,61 @@
  * actually makes the tap feel like it landed. */
 #define CLR_PRESS_HALO C2D_Color32(0x1D, 0xB9, 0x54, 0x33)
 
+/* Lyrics entry pills, in the band between the shelf and the transport row. */
+#define ACTROW_Y      104.0f
+#define ACTROW_H      24.0f
+#define CLR_PILL      C2D_Color32(0x22, 0x22, 0x22, 0xFF)
+#define CLR_PILL_PR   C2D_Color32(0x30, 0x30, 0x30, 0xFF)
+#define CLR_GREEN_PR  C2D_Color32(0x28, 0xD8, 0x68, 0xFF)
+#define CLR_DARK_TXT  C2D_Color32(0x08, 0x08, 0x08, 0xFF)
+
 static u32 press_clr(u32 clr, bool pressed)
 {
 	return pressed ? CLR_GREEN : clr;
+}
+
+static void rounded_rect(float x, float y, float w, float h, float r, u32 clr)
+{
+	C2D_DrawRectSolid(x + r, y, 0.0f, w - 2.0f * r, h, clr);
+	C2D_DrawRectSolid(x, y + r, 0.0f, w, h - 2.0f * r, clr);
+	ui_disc(x + r, y + r, r, clr);
+	ui_disc(x + w - r, y + r, r, clr);
+	ui_disc(x + r, y + h - r, r, clr);
+	ui_disc(x + w - r, y + h - r, r, clr);
+}
+
+/* LYRICS opens the bottom-screen list; 3D toggles the top-screen overlay. Drawn
+ * as a centred pair so the two lyrics surfaces are discoverable from the player
+ * rather than hidden behind a button chord. */
+static void draw_lyrics_pills(const screen_player_args *a)
+{
+	const float pad = 12.0f, gap = 8.0f;
+	const float lyr_tw = ui_text_width(a->buf, "LYRICS", TY_ROW_SUB);
+	const float td_tw  = ui_text_width(a->buf, "3D", TY_ROW_SUB);
+	const float lyr_w  = lyr_tw + 2.0f * pad;
+	const float td_w   = td_tw + 2.0f * pad;
+	const float x0     = (BOT_W - (lyr_w + gap + td_w)) / 2.0f;
+	const float base   = ui_baseline(
+        ACTROW_Y + (ACTROW_H - ui_px(TY_ROW_SUB)) / 2.0f, TY_ROW_SUB);
+
+	const bool lyr_pr = a->pressed_id == BTN_LYRICS;
+	rounded_rect(x0, ACTROW_Y, lyr_w, ACTROW_H, ACTROW_H / 2.0f,
+	             lyr_pr ? CLR_PILL_PR : CLR_PILL);
+	ui_text(a->buf, "LYRICS", x0 + pad, base, TY_ROW_SUB, lyr_tw + 2.0f,
+	        lyr_pr ? CLR_GREEN : CLR_WHITE);
+	tb_add(a->tb, x0 - 6.0f, ACTROW_Y - 6.0f, lyr_w + 12.0f, ACTROW_H + 12.0f,
+	       BTN_LYRICS);
+
+	const float tx = x0 + lyr_w + gap;
+	const bool td_pr = a->pressed_id == BTN_LYRICS_3D;
+	const u32 td_bg = a->top_lyrics ? (td_pr ? CLR_GREEN_PR : CLR_GREEN)
+	                  : td_pr       ? CLR_PILL_PR
+	                                : CLR_PILL;
+	rounded_rect(tx, ACTROW_Y, td_w, ACTROW_H, ACTROW_H / 2.0f, td_bg);
+	ui_text(a->buf, "3D", tx + pad, base, TY_ROW_SUB, td_tw + 2.0f,
+	        a->top_lyrics ? CLR_DARK_TXT : CLR_WHITE);
+	tb_add(a->tb, tx - 6.0f, ACTROW_Y - 6.0f, td_w + 12.0f, ACTROW_H + 12.0f,
+	       BTN_LYRICS_3D);
 }
 
 static void press_halo(float cx, float cy, bool pressed)
@@ -326,6 +378,9 @@ void screen_player_draw(const screen_player_args *a)
 	 * inside the loop, as Spotify does it. */
 	if (a->repeat != REPEAT_OFF)
 		ui_disc(rep_x, ROW_Y + 12.0f, 1.5f, CLR_GREEN);
+
+	/* --- lyrics entry -------------------------------------------------- */
+	draw_lyrics_pills(a);
 
 	/* --- scrubber ------------------------------------------------------ */
 	char elapsed[16], total[16];

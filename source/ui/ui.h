@@ -66,6 +66,19 @@ void ui_text_tracked(C2D_TextBuf buf, const char *s, float x, float y,
 /* Width the string would occupy, for right-aligning and centring. */
 float ui_text_width(C2D_TextBuf buf, const char *s, type_role r);
 
+/* Greedy word-wrap `s` into at most max_lines lines that each fit maxw at role
+ * r, breaking on spaces. Writes NUL-terminated lines into out (fixed 128-byte
+ * rows). Any overflow past max_lines is appended to the last line so ui_text
+ * ellipsises it. Returns the number of lines written (>= 1). Measurement uses
+ * the shared probe buffer, so this is safe to call mid-frame. */
+int ui_wrap(const char *s, type_role r, float maxw, char out[][128],
+            int max_lines);
+
+/* Fill a w x h region (origin 0,0 of the current scene) with the album cover,
+ * scaled to cover and darkened so text stays legible on top. Draws a plain dark
+ * wash when img is NULL. Used behind the lyrics views. */
+void ui_backdrop(const C2D_Image *img, float w, float h);
+
 /* Filled circle. citro2d has no circle primitive; this is a triangle fan, and
  * 16 segments at r=20 keeps the chord error under half a pixel. */
 void ui_disc(float cx, float cy, float r, u32 clr);

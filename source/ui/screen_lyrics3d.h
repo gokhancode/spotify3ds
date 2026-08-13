@@ -16,6 +16,7 @@
 typedef struct {
 	C2D_TextBuf       buf;
 	const lyrics_doc *doc;
+	const C2D_Image  *cover;        /* album art for the blurred backdrop, or NULL */
 	int               center;       /* line to feature in the foreground */
 	bool              active;       /* center is the live line (bright) */
 	float             depth;        /* osGet3DSliderState(), 0..1 */
