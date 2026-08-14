@@ -347,8 +347,11 @@ void screen_player_draw(const screen_player_args *a)
 	for (int i = 0; i < SHELF_TILES; i++) {
 		const float x = SHELF_X + (float)i * (TILE + TILE_GAP);
 		if (a->shelf[i]) {
-			const float s = TILE / (float)a->shelf[i]->subtex->width;
-			C2D_DrawImageAt(*a->shelf[i], x, SHELF_Y, 0.0f, NULL, s, s);
+			/* Separate axes so a non-square cover (some playlist mosaics) is
+			 * fit into the tile instead of overflowing below it. */
+			const float sx = TILE / (float)a->shelf[i]->subtex->width;
+			const float sy = TILE / (float)a->shelf[i]->subtex->height;
+			C2D_DrawImageAt(*a->shelf[i], x, SHELF_Y, 0.0f, NULL, sx, sy);
 		} else {
 			C2D_DrawRectSolid(x, SHELF_Y, 0.0f, TILE, TILE, CLR_TILE_BG);
 		}

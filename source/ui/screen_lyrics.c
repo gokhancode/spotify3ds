@@ -176,16 +176,26 @@ void screen_lyrics_draw(const screen_lyrics_args *a)
 	        TY_ROW_NAME, 70.0f, back_clr);
 	tb_add(a->tb, 0.0f, 0.0f, 96.0f, HEADER_H, LYRICS_BTN_BACK);
 
+	/* When lrclib only had plain lyrics, say so - that is why they don't scroll. */
+	const bool  unsynced = a->doc && a->doc->count > 0 && !a->doc->synced;
+	const float title_r = unsynced ? 234.0f : 282.0f;
 	const char *title = a->track && a->track[0] ? a->track
 	                    : a->doc && a->doc->track[0] ? a->doc->track
 	                                                 : "Lyrics";
 	const float tw = ui_text_width(a->buf, title, TY_ROW_NAME);
-	float       tx = 96.0f + (186.0f - tw) / 2.0f; /* centred in the 96..282 gap */
+	float       tx = 96.0f + ((title_r - 96.0f) - tw) / 2.0f;
 	if (tx < 100.0f)
 		tx = 100.0f;
 	ui_text(a->buf, title, tx,
 	        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2.0f, TY_ROW_NAME),
-	        TY_ROW_NAME, 282.0f - tx, CLR_NAME);
+	        TY_ROW_NAME, title_r - tx, CLR_NAME);
+
+	if (unsynced) {
+		const float tgw = ui_text_width(a->buf, "unsynced", TY_MICRO);
+		ui_text(a->buf, "unsynced", 282.0f - tgw,
+		        ui_baseline((HEADER_H - ui_px(TY_MICRO)) / 2.0f, TY_MICRO),
+		        TY_MICRO, tgw + 2.0f, CLR_SUB);
+	}
 
 	/* 3D toggle pill: sends the lyrics to the top screen as a hovering stack.
 	 * Also bound to Y in main.c; this is the touch + on/off indicator. */

@@ -211,25 +211,31 @@ static bool get_field(const json_doc *d, const char *base, const char *field,
 	return buf[0] != '\0';
 }
 
-/* Turn one lrclib object (at `base`) into out. Prefers synced lyrics, falls
- * back to plain. Returns true only when at least one line was produced. */
-static bool doc_from_object(const json_doc *d, const char *base,
-                            const char *track, const char *artist, char *buf,
-                            size_t buflen, lyrics_doc *out)
+/* Parse the *synced* lyrics of one object (at `base`) into out. Returns true
+ * only when it produced timed lines; out is left untouched on failure, so a
+ * plain fallback held elsewhere is preserved. */
+static bool synced_from(const json_doc *d, const char *base, const char *track,
+                        const char *artist, char *buf, size_t buflen,
+                        lyrics_doc *out)
 {
-	if (get_field(d, base, "syncedLyrics", buf, buflen)) {
-		fill_meta(out, track, artist);
-		lyrics_parse_lrc(buf, out);
-		if (out->count > 0)
-			return true;
-	}
-	if (get_field(d, base, "plainLyrics", buf, buflen)) {
-		fill_meta(out, track, artist);
-		parse_plain(buf, out);
-		if (out->count > 0)
-			return true;
-	}
-	return false;
+	if (!get_field(d, base, "syncedLyrics", buf, buflen))
+		return false;
+	fill_meta(out, track, artist);
+	lyrics_parse_lrc(buf, out);
+	return out->count > 0;
+}
+
+/* Copy one object's non-empty plainLyrics into a fresh string, else NULL. Kept
+ * as a fallback while we keep hunting for a synced version. */
+static char *plain_dup(const json_doc *d, const char *base, char *buf,
+                       size_t buflen)
+{
+	if (!get_field(d, base, "plainLyrics", buf, buflen))
+		return NULL;
+	char *copy = malloc(strlen(buf) + 1);
+	if (copy)
+		strcpy(copy, buf);
+	return copy;
 }
 
 lyrics_result lyrics_fetch(const char *track, const char *artist,
@@ -261,6 +267,8 @@ lyrics_result lyrics_fetch(const char *track, const char *artist,
 		snprintf(path + n, sizeof path - (size_t)n, "&duration=%ld",
 		         duration_ms / 1000);
 
+	char *plain = NULL; /* best plain-text fallback found while hunting synced */
+
 	http_response r;
 	if (http_request(LRCLIB_HOST, "GET", path, NULL, NULL, NULL, &r, err,
 	                 errlen)) {
@@ -273,17 +281,20 @@ lyrics_result lyrics_fetch(const char *track, const char *artist,
 					instrumental = true;
 				char *buf = malloc(r.body_len + 1);
 				if (buf) {
-					const bool got = doc_from_object(d, "", track, artist, buf,
-					                                 r.body_len + 1, out);
-					free(buf);
-					if (got) {
+					if (synced_from(d, "", track, artist, buf, r.body_len + 1,
+					                out)) {
+						free(buf);
 						json_doc_free(d);
 						http_free(&r);
-						tl_timing("lyrics get ok: %d lines synced=%d %llums",
-						          out->count, (int)out->synced,
+						tl_timing("lyrics get synced: %d lines %llums",
+						          out->count,
 						          (unsigned long long)(osGetTime() - t0));
 						return LYRICS_OK;
 					}
+					/* Exact match had only plain lyrics; hold it but keep
+					 * looking for a synced version via search. */
+					plain = plain_dup(d, "", buf, r.body_len + 1);
+					free(buf);
 				}
 				json_doc_free(d);
 			}
@@ -291,7 +302,8 @@ lyrics_result lyrics_fetch(const char *track, const char *artist,
 		http_free(&r);
 	}
 
-	if (instrumental) {
+	/* Only bail as instrumental when there is genuinely nothing to show. */
+	if (instrumental && !plain) {
 		tl_log("lyrics: instrumental %s - %s", track, artist);
 		return LYRICS_INSTRUMENTAL;
 	}
@@ -313,20 +325,27 @@ lyrics_result lyrics_fetch(const char *track, const char *artist,
 					count = 20; /* first matches are the best ranked */
 				char *buf = malloc(s.body_len + 1);
 				if (buf) {
+					/* Prefer any synced result over the plain fallback. */
 					for (int i = 0; i < count; i++) {
 						char base[16];
 						snprintf(base, sizeof base, "[%d]", i);
-						if (doc_from_object(d, base, track, artist, buf,
-						                    s.body_len + 1, out)) {
+						if (synced_from(d, base, track, artist, buf,
+						                s.body_len + 1, out)) {
 							free(buf);
 							json_doc_free(d);
 							http_free(&s);
-							tl_timing(
-							    "lyrics search ok: %d lines synced=%d %llums",
-							    out->count, (int)out->synced,
-							    (unsigned long long)(osGetTime() - t0));
+							free(plain);
+							tl_timing("lyrics search synced: %d lines %llums",
+							          out->count,
+							          (unsigned long long)(osGetTime() - t0));
 							return LYRICS_OK;
 						}
+					}
+					/* No synced anywhere: remember the first plain we find. */
+					for (int i = 0; i < count && !plain; i++) {
+						char base[16];
+						snprintf(base, sizeof base, "[%d]", i);
+						plain = plain_dup(d, base, buf, s.body_len + 1);
 					}
 					free(buf);
 				}
@@ -336,6 +355,19 @@ lyrics_result lyrics_fetch(const char *track, const char *artist,
 		http_free(&s);
 	}
 
+	if (plain) {
+		fill_meta(out, track, artist);
+		parse_plain(plain, out);
+		free(plain);
+		if (out->count > 0) {
+			tl_timing("lyrics plain: %d lines %llums", out->count,
+			          (unsigned long long)(osGetTime() - t0));
+			return LYRICS_OK;
+		}
+	}
+
+	if (instrumental)
+		return LYRICS_INSTRUMENTAL;
 	tl_log("lyrics: none for %s - %s", track, artist);
 	snprintf(err, errlen, "no lyrics found");
 	return LYRICS_NONE;
