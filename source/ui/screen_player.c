@@ -73,26 +73,14 @@ static void draw_lyrics_pills(const screen_player_args *a)
 	const float td_tw  = ui_text_width(a->buf, "3D", TY_ROW_SUB);
 	const float lyr_w  = lyr_tw + 2.0f * pad;
 	const float td_w   = td_tw + 2.0f * pad;
-	const float srch_w = PILL_H + 2.0f; /* square-ish magnifier button */
 	const float td_x   = BOT_W - 10.0f - td_w;
 	const float lyr_x  = td_x - gap - lyr_w;
-	const float srch_x = lyr_x - gap - srch_w;
 	const float base   = ui_baseline(
         PILL_Y + (PILL_H - ui_px(TY_ROW_SUB)) / 2.0f, TY_ROW_SUB);
 
-	/* Search: magnifier icon (a hollow ring plus a short handle). */
-	const bool srch_pr = a->pressed_id == BTN_SEARCH;
-	const u32  srch_bg = srch_pr ? CLR_PILL_PR : CLR_PILL;
-	const u32  srch_fg = srch_pr ? CLR_GREEN : CLR_WHITE;
-	rounded_rect(srch_x, PILL_Y, srch_w, PILL_H, PILL_H / 2.0f, srch_bg);
-	const float icx = srch_x + srch_w / 2.0f - 1.0f;
-	const float icy = PILL_Y + PILL_H / 2.0f - 1.0f;
-	ui_disc(icx, icy, 4.0f, srch_fg);
-	ui_disc(icx, icy, 2.5f, srch_bg);
-	C2D_DrawLine(icx + 2.5f, icy + 2.5f, srch_fg, icx + 5.0f, icy + 5.0f,
-	             srch_fg, 2.0f, 0.0f);
-	tb_add(a->tb, srch_x - 4.0f, PILL_Y - 6.0f, srch_w + 8.0f, PILL_H + 12.0f,
-	       BTN_SEARCH);
+	/* Search intentionally has no button: Spotify blocks catalog search for
+	 * development-mode apps, so the feature can't work. The search code stays in
+	 * the tree (VIEW_SEARCH, BTN_SEARCH) for if the app ever gets Extended Quota. */
 
 	const bool lyr_pr = a->pressed_id == BTN_LYRICS;
 	rounded_rect(lyr_x, PILL_Y, lyr_w, PILL_H, PILL_H / 2.0f,
@@ -119,7 +107,7 @@ static void draw_device_chip(const screen_player_args *a)
 {
 	const bool  have = a->device && a->device[0];
 	const char *name = have ? a->device : "No device";
-	const float pad = 9.0f, icon = 6.0f, gap = 6.0f, maxname = 78.0f;
+	const float pad = 9.0f, icon = 6.0f, gap = 6.0f, maxname = 104.0f;
 	float       nw = ui_text_width(a->buf, name, TY_ROW_SUB);
 	if (nw > maxname)
 		nw = maxname;
