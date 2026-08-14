@@ -10,6 +10,7 @@
 #include "spotify/auth.h"
 #include "spotify/lyrics.h"
 #include "spotify/recents.h"
+#include "spotify/search.h"
 #include "spotify/tracks.h"
 #include "testlog.h"
 
@@ -129,6 +130,31 @@ static bool                   s_lyrics_pending;
 static unsigned               s_lyrics_generation;
 static worker_lyrics_snapshot s_lyrics;
 
+/* Connect devices + the chosen playback target. */
+#define DEVICES_REFRESH_MS 15000
+static device_list s_devices;
+static bool        s_devices_wanted = true; /* fetch once at startup */
+static u64         s_devices_at;
+static char        s_target_device[128];
+
+/* Track search, newest-request-wins like tracks. */
+typedef struct {
+	char     query[64];
+	unsigned generation;
+} search_request;
+
+static search_request        s_search_want;
+static bool                  s_search_pending;
+static unsigned              s_search_generation;
+static worker_search_snapshot s_search;
+
+/* Self-update. s_update_stage is written live by updater_run; the rest is
+ * guarded by s_lock. */
+static bool                  s_update_wanted;
+static bool                  s_update_running;
+static volatile update_stage s_update_stage;
+static char                  s_update_msg[160];
+
 static void set_status(const char *s)
 {
 	LightLock_Lock(&s_lock);
@@ -153,6 +179,9 @@ static void do_playlists(void);
 static void do_albums(void);
 static void do_tracks(void);
 static void do_lyrics(void);
+static void do_devices(void);
+static void do_search(void);
+static void do_update(void);
 static void do_thumbs(void);
 static void do_current_metadata(void);
 
@@ -333,7 +362,18 @@ static void do_cmd(const queued_cmd *q)
 	const u64 t0 = osGetTime();
 
 	switch (q->cmd) {
-		case CMD_PLAY:    pr = player_play(err, sizeof err); break;
+		case CMD_PLAY:
+			pr = player_play(err, sizeof err);
+			/* Nothing active to resume: if the user picked a device, wake it. */
+			if (pr == PLAYER_NO_DEVICE) {
+				char tgt[128];
+				LightLock_Lock(&s_lock);
+				snprintf(tgt, sizeof tgt, "%s", s_target_device);
+				LightLock_Unlock(&s_lock);
+				if (tgt[0])
+					pr = player_transfer(tgt, true, err, sizeof err);
+			}
+			break;
 		case CMD_PAUSE:   pr = player_pause(err, sizeof err); break;
 		case CMD_NEXT:    pr = player_next(err, sizeof err); break;
 		case CMD_PREV:    pr = player_prev(err, sizeof err); break;
@@ -346,13 +386,20 @@ static void do_cmd(const queued_cmd *q)
 		case CMD_VOLUME:
 			pr = player_set_volume((int)q->arg, q->device_id, err, sizeof err);
 			break;
-		case CMD_PLAY_CONTEXT:
+		case CMD_PLAY_CONTEXT: {
+			const char *dev = q->device_id[0] ? q->device_id : NULL;
 			if (q->item_uri[0])
-				pr = player_play_context_item(q->context_uri, q->item_uri, err,
-				                              sizeof err);
+				pr = player_play_context_item(q->context_uri, q->item_uri, dev,
+				                              err, sizeof err);
 			else
-				pr = player_play_context_at(q->context_uri, q->position, err,
-				                            sizeof err);
+				pr = player_play_context_at(q->context_uri, q->position, dev,
+				                            err, sizeof err);
+			break;
+		}
+		case CMD_PLAY_TRACK:
+			pr = player_play_track(q->item_uri,
+			                       q->device_id[0] ? q->device_id : NULL, err,
+			                       sizeof err);
 			break;
 		default: return;
 	}
@@ -483,6 +530,9 @@ static void worker_main(void *arg)
 		do_art();
 		do_tracks();
 		do_lyrics();
+		do_devices();
+		do_search();
+		do_update();
 
 		/* Lists last: the cover the user is looking at matters more than the
 		 * shelf behind it. Playlists before recents so the name cache is warm
@@ -1208,6 +1258,218 @@ static void do_lyrics(void)
 	free(doc);
 }
 
+int worker_get_devices(device_list *out)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	*out = s_devices;
+	const int n = s_devices.count;
+	LightLock_Unlock(&s_lock);
+	return n;
+}
+
+void worker_request_devices(void)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	s_devices_wanted = true;
+	LightLock_Unlock(&s_lock);
+}
+
+void worker_set_target_device(const char *device_id)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	snprintf(s_target_device, sizeof s_target_device, "%s",
+	         device_id ? device_id : "");
+	LightLock_Unlock(&s_lock);
+}
+
+void worker_get_target_device(char *out, int outlen)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	snprintf(out, outlen, "%s", s_target_device);
+	LightLock_Unlock(&s_lock);
+}
+
+/* Runs on the worker thread. Fetched at startup, on request, and refreshed every
+ * DEVICES_REFRESH_MS while nothing is playing so the picker stays current. When
+ * something is already playing the poll already carries the active device, so
+ * this then only runs on an explicit request. */
+static void do_devices(void)
+{
+	LightLock_Lock(&s_lock);
+	const bool want = s_devices_wanted;
+	const u64  last = s_devices_at;
+	const bool idle = !s_have_state;
+	LightLock_Unlock(&s_lock);
+
+	if (!want) {
+		if (!idle)
+			return;
+		if (last && osGetTime() - last < DEVICES_REFRESH_MS)
+			return;
+	}
+
+	device_list *fresh = malloc(sizeof *fresh);
+	if (!fresh)
+		return;
+
+	char                err[256];
+	const player_result pr = player_devices(fresh, err, sizeof err);
+
+	LightLock_Lock(&s_lock);
+	s_devices_wanted = false;
+	s_devices_at = osGetTime();
+	if (pr == PLAYER_OK)
+		s_devices = *fresh;
+	LightLock_Unlock(&s_lock);
+
+	free(fresh);
+
+	if (pr != PLAYER_OK && pr != PLAYER_NOTHING_PLAYING)
+		tl_log("devices: %s (%s)", player_result_str(pr), err);
+}
+
+unsigned worker_request_search(const char *query)
+{
+	if (!query || !query[0])
+		return 0;
+
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	const unsigned generation = ++s_search_generation;
+	snprintf(s_search_want.query, sizeof s_search_want.query, "%s", query);
+	s_search_want.generation = generation;
+	s_search_pending = true;
+
+	s_search.state = SEARCH_LOADING;
+	s_search.result = PLAYER_OK;
+	s_search.generation = generation;
+	s_search.error[0] = '\0';
+	s_search.results.count = 0;
+	snprintf(s_search.results.query, sizeof s_search.results.query, "%s", query);
+	LightLock_Unlock(&s_lock);
+	return generation;
+}
+
+void worker_get_search(worker_search_snapshot *out)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	*out = s_search;
+	LightLock_Unlock(&s_lock);
+}
+
+bool worker_play_track(const char *track_uri)
+{
+	if (!track_uri || !track_uri[0])
+		return false;
+	ensure_lock();
+	queued_cmd q;
+	memset(&q, 0, sizeof q);
+	q.cmd = CMD_PLAY_TRACK;
+	snprintf(q.item_uri, sizeof q.item_uri, "%s", track_uri);
+	LightLock_Lock(&s_lock);
+	snprintf(q.device_id, sizeof q.device_id, "%s", s_target_device);
+	LightLock_Unlock(&s_lock);
+	return enqueue(&q);
+}
+
+static void do_search(void)
+{
+	search_request req;
+	LightLock_Lock(&s_lock);
+	const bool pending = s_search_pending;
+	if (pending) {
+		req = s_search_want;
+		s_search_pending = false;
+		s_busy = true;
+	}
+	LightLock_Unlock(&s_lock);
+	if (!pending)
+		return;
+
+	search_results *res = malloc(sizeof *res);
+	if (!res) {
+		LightLock_Lock(&s_lock);
+		if (req.generation == s_search_generation) {
+			s_search.state = SEARCH_ERROR;
+			snprintf(s_search.error, sizeof s_search.error, "Out of memory");
+		}
+		LightLock_Unlock(&s_lock);
+		return;
+	}
+
+	char                err[256] = "";
+	const player_result pr = search_tracks(req.query, res, err, sizeof err);
+
+	LightLock_Lock(&s_lock);
+	if (req.generation == s_search_generation) {
+		s_search.result = pr;
+		s_search.generation = req.generation;
+		if (pr == PLAYER_OK) {
+			s_search.results = *res;
+			s_search.state = SEARCH_READY;
+			s_search.error[0] = '\0';
+		} else {
+			s_search.results.count = 0;
+			s_search.state = SEARCH_ERROR;
+			snprintf(s_search.error, sizeof s_search.error, "%s",
+			         err[0] ? err : player_result_str(pr));
+		}
+	}
+	LightLock_Unlock(&s_lock);
+
+	free(res);
+	if (pr != PLAYER_OK)
+		tl_log("search '%s': %s (%s)", req.query, player_result_str(pr), err);
+}
+
+void worker_start_update(void)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	if (!s_update_running)
+		s_update_wanted = true;
+	LightLock_Unlock(&s_lock);
+}
+
+void worker_get_update(worker_update_snapshot *out)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	out->stage = s_update_stage;
+	snprintf(out->message, sizeof out->message, "%s", s_update_msg);
+	LightLock_Unlock(&s_lock);
+}
+
+static void do_update(void)
+{
+	LightLock_Lock(&s_lock);
+	const bool go = s_update_wanted && !s_update_running;
+	if (go) {
+		s_update_wanted = false;
+		s_update_running = true;
+		s_update_stage = UPDATE_DOWNLOADING;
+		s_update_msg[0] = '\0';
+		s_busy = true;
+	}
+	LightLock_Unlock(&s_lock);
+	if (!go)
+		return;
+
+	char       err[256] = "";
+	const bool ok = updater_run(&s_update_stage, err, sizeof err);
+
+	LightLock_Lock(&s_lock);
+	s_update_running = false;
+	snprintf(s_update_msg, sizeof s_update_msg, "%s", ok ? "" : err);
+	LightLock_Unlock(&s_lock);
+	tl_log("update: %s (%s)", ok ? "done" : "failed", err);
+}
+
 void worker_play_context(const char *context_uri)
 {
 	worker_play_context_at(context_uri, -1);
@@ -1223,6 +1485,9 @@ bool worker_play_context_at(const char *context_uri, int position)
 	q.cmd = CMD_PLAY_CONTEXT;
 	q.position = position;
 	snprintf(q.context_uri, sizeof q.context_uri, "%s", context_uri);
+	LightLock_Lock(&s_lock);
+	snprintf(q.device_id, sizeof q.device_id, "%s", s_target_device);
+	LightLock_Unlock(&s_lock);
 	return enqueue(&q);
 }
 
@@ -1236,6 +1501,9 @@ bool worker_play_context_item(const char *context_uri, const char *item_uri)
 	q.cmd = CMD_PLAY_CONTEXT;
 	snprintf(q.context_uri, sizeof q.context_uri, "%s", context_uri);
 	snprintf(q.item_uri, sizeof q.item_uri, "%s", item_uri);
+	LightLock_Lock(&s_lock);
+	snprintf(q.device_id, sizeof q.device_id, "%s", s_target_device);
+	LightLock_Unlock(&s_lock);
 	return enqueue(&q);
 }
 

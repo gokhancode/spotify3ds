@@ -185,11 +185,11 @@ static bool http_exchange(const char *host, const char *method,
 
 	/* --- request ---------------------------------------------------- */
 	growbuf req = {0};
-	/* 1KB, not 512: Spotify paths are short, but lrclib lyrics lookups carry
-	 * URL-encoded track/artist/album in the query and can approach ~700 bytes.
-	 * snprintf truncates safely, but a truncated request line is a broken
+	/* 2KB: lrclib lyrics lookups carry URL-encoded metadata, and the updater
+	 * follows GitHub redirects to signed CDN URLs that can run several hundred
+	 * bytes. snprintf truncates safely, but a truncated request line is a broken
 	 * request, so give the whole first-header block room. */
-	char    line[1024];
+	char    line[2048];
 
 	/* Keep-alive is the whole point: a fresh TLS handshake to Spotify costs
 	 * 700-1500ms and used to be paid on every request. */
@@ -260,6 +260,19 @@ static bool http_exchange(const char *host, const char *method,
 		goto fail;
 	}
 	out->status = atoi(raw.buf + 9);
+
+	/* Capture Location so callers can follow redirects (the updater needs it). */
+	{
+		const char *loc = find_header(raw.buf, "Location");
+		if (loc) {
+			int n = 0;
+			while (loc[n] && loc[n] != '\r' && loc[n] != '\n' &&
+			       n < (int)sizeof out->location - 1)
+				n++;
+			memcpy(out->location, loc, (size_t)n);
+			out->location[n] = '\0';
+		}
+	}
 
 	size_t body_start = (size_t)(hdr_end - raw.buf) + 4;
 
@@ -333,6 +346,65 @@ static bool http_exchange(const char *host, const char *method,
 fail:
 	free(raw.buf);
 	pool_give(host, 443, c, false);
+	return false;
+}
+
+/* Split "https://host[:port]/path" into host and path (https only, port 443). */
+static bool parse_https_url(const char *url, char *host, size_t hostlen,
+                            char *path, size_t pathlen)
+{
+	if (strncmp(url, "https://", 8) != 0)
+		return false;
+	const char *h = url + 8;
+	const char *p = h;
+	while (*p && *p != '/' && *p != ':')
+		p++;
+	const size_t hl = (size_t)(p - h);
+	if (hl == 0 || hl >= hostlen)
+		return false;
+	memcpy(host, h, hl);
+	host[hl] = '\0';
+
+	while (*p && *p != '/') /* skip an explicit :port */
+		p++;
+	snprintf(path, pathlen, "%s", *p ? p : "/");
+	return true;
+}
+
+bool http_get_follow(const char *url, http_response *out, int max_redirects,
+                     char *err, int errlen)
+{
+	char cur[1600];
+	snprintf(cur, sizeof cur, "%s", url);
+
+	for (int hop = 0; hop <= max_redirects; hop++) {
+		char host[128], path[1400];
+		if (!parse_https_url(cur, host, sizeof host, path, sizeof path)) {
+			snprintf(err, errlen, "bad url");
+			return false;
+		}
+
+		if (!http_request(host, "GET", path, NULL, NULL, NULL, out, err, errlen))
+			return false;
+
+		if (out->status >= 300 && out->status < 400 && out->location[0]) {
+			char loc[1024];
+			snprintf(loc, sizeof loc, "%s", out->location);
+			http_free(out);
+			if (strncmp(loc, "http", 4) == 0) {
+				snprintf(cur, sizeof cur, "%s", loc);
+			} else {
+				/* Relative redirect: keep the current host. */
+				snprintf(cur, sizeof cur, "https://%s%s%s", host,
+				         loc[0] == '/' ? "" : "/", loc);
+			}
+			continue;
+		}
+		return true; /* final response; caller frees */
+	}
+
+	snprintf(err, errlen, "too many redirects");
+	http_free(out);
 	return false;
 }
 

@@ -42,8 +42,36 @@ typedef struct {
 	repeat_mode repeat;
 } player_state;
 
+/* Spotify Connect devices, from GET /v1/me/player/devices. Lists every device
+ * that currently has the Spotify app open, including idle ones - which is how
+ * the 3DS can start playback without something already playing on it. */
+#define DEVICES_MAX 8
+typedef struct {
+	char id[128];
+	char name[64];
+	char type[32];
+	long volume_percent;
+	bool is_active;
+	bool is_restricted;  /* cannot be controlled through the Web API */
+	bool supports_volume;
+	bool volume_known;
+} device_item;
+
+typedef struct {
+	device_item items[DEVICES_MAX];
+	int         count;
+} device_list;
+
 /* GET /v1/me/player/currently-playing */
 player_result player_poll(player_state *out, char *err, int errlen);
+
+/* GET /v1/me/player/devices */
+player_result player_devices(device_list *out, char *err, int errlen);
+
+/* Transfer playback to a device, optionally starting it. Wakes an idle device
+ * chosen from the picker when there is nothing playing to redirect. */
+player_result player_transfer(const char *device_id, bool play, char *err,
+                              int errlen);
 
 /* Transport controls. All return PLAYER_OK on Spotify's 204. */
 player_result player_play(char *err, int errlen);
@@ -60,19 +88,28 @@ player_result player_set_volume(int volume_percent, const char *device_id,
 /* Next state in the off -> context -> track -> off cycle. */
 repeat_mode repeat_next(repeat_mode m);
 
-/* Start playback from a context (album or playlist uri). */
-player_result player_play_context(const char *context_uri, char *err,
-                                  int errlen);
+/* Start playback from a context (album or playlist uri). device_id, when
+ * non-NULL/non-empty, targets and wakes that device rather than the active one -
+ * this is what lets the 3DS start an idle device. */
+player_result player_play_context(const char *context_uri, const char *device_id,
+                                  char *err, int errlen);
 
 /* Start a context at a raw zero-based playback position. Do not derive this
  * from playlist-page offsets: unavailable/local entries can make them differ. */
 player_result player_play_context_at(const char *context_uri, int position,
-                                     char *err, int errlen);
+                                     const char *device_id, char *err,
+                                     int errlen);
 
 /* Start a context at a specific track URI. This remains exact when unavailable
  * or local playlist entries make API page positions differ from playback. */
 player_result player_play_context_item(const char *context_uri,
-                                       const char *item_uri, char *err,
+                                       const char *item_uri,
+                                       const char *device_id, char *err,
                                        int errlen);
+
+/* Play a single track by uri, with no surrounding context (for search results).
+ * device_id targets/wakes a device as with the context variants. */
+player_result player_play_track(const char *track_uri, const char *device_id,
+                                char *err, int errlen);
 
 const char *player_result_str(player_result r);

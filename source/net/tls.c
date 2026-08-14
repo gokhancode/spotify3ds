@@ -45,6 +45,12 @@ extern const unsigned char globalsign_r3_der[];
 extern const unsigned char globalsign_r3_der_end[];
 extern const unsigned char gts_root_r4_der[];
 extern const unsigned char gts_root_r4_der_end[];
+/* github.com (Sectigo) and objects.githubusercontent.com (Let's Encrypt/ISRG)
+ * for the in-app updater's release download. */
+extern const unsigned char sectigo_e46_der[];
+extern const unsigned char sectigo_e46_der_end[];
+extern const unsigned char isrg_root_yr_der[];
+extern const unsigned char isrg_root_yr_der_end[];
 
 struct tls_conn {
 	int                      fd;
@@ -161,6 +167,8 @@ tls_conn *tls_connect(const char *host, int port, char *err, int errlen)
 			{digicert_g3_der, digicert_g3_der_end},
 			{globalsign_r3_der, globalsign_r3_der_end},
 			{gts_root_r4_der, gts_root_r4_der_end},
+			{sectigo_e46_der, sectigo_e46_der_end},
+			{isrg_root_yr_der, isrg_root_yr_der_end},
 		};
 
 		for (unsigned i = 0; i < sizeof roots / sizeof roots[0]; i++) {

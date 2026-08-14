@@ -5,7 +5,9 @@
 #include "spotify/lyrics.h"
 #include "spotify/player.h"
 #include "spotify/recents.h"
+#include "spotify/search.h"
 #include "spotify/tracks.h"
+#include "updater.h"
 
 /* Background network thread.
  *
@@ -25,6 +27,7 @@ typedef enum {
 	CMD_SHUFFLE,
 	CMD_REPEAT,
 	CMD_PLAY_CONTEXT,
+	CMD_PLAY_TRACK,
 	CMD_QUEUE_ITEM,
 	CMD_VOLUME,
 } worker_cmd;
@@ -155,6 +158,53 @@ unsigned worker_request_lyrics(const char *track, const char *artist,
                                const char *album, long duration_ms,
                                const char *track_uri);
 void     worker_get_lyrics(worker_lyrics_snapshot *out);
+
+/* --- devices (Spotify Connect targets) --------------------------------
+ * Lets the 3DS start playback on an idle-but-open device instead of only
+ * controlling whatever is already active. Refreshed at startup, on request,
+ * and periodically while nothing is playing. */
+int  worker_get_devices(device_list *out); /* copies list, returns count */
+void worker_request_devices(void);
+
+/* The device new playback is aimed at. Empty means "the active device". */
+void worker_set_target_device(const char *device_id);
+void worker_get_target_device(char *out, int outlen);
+
+/* --- search ------------------------------------------------------------
+ * Track search, same newest-request-wins generation scheme as tracks. */
+
+typedef enum {
+	SEARCH_IDLE = 0,
+	SEARCH_LOADING,
+	SEARCH_READY,
+	SEARCH_ERROR,
+} search_state;
+
+typedef struct {
+	search_results results;
+	search_state   state;
+	player_result  result;
+	unsigned       generation;
+	char           error[160];
+} worker_search_snapshot;
+
+unsigned worker_request_search(const char *query);
+void     worker_get_search(worker_search_snapshot *out);
+
+/* Play a single track by uri on the chosen target device. */
+bool worker_play_track(const char *track_uri);
+
+/* --- self-update ------------------------------------------------------- */
+
+typedef struct {
+	update_stage stage;
+	char         message[160]; /* error detail when stage == UPDATE_FAILED */
+} worker_update_snapshot;
+
+/* Kick off a download+install on the worker thread (ignored if one is already
+ * running). Poll worker_get_update for progress. */
+void worker_start_update(void);
+void worker_get_update(worker_update_snapshot *out);
 
 /* --- album art -------------------------------------------------------
  * Fetching and decoding art costs ~1.5s, almost all of it network. Doing that

@@ -13,10 +13,12 @@
 #include "spotify/auth.h"
 #include "spotify/player.h"
 #include "testlog.h"
+#include "ui/screen_devices.h"
 #include "ui/screen_list.h"
 #include "ui/screen_lyrics.h"
 #include "ui/screen_lyrics3d.h"
 #include "ui/screen_player.h"
+#include "ui/screen_search.h"
 #include "ui/screen_tracks.h"
 #include "ui/screen_top.h"
 #include "ui/thumbs.h"
@@ -84,7 +86,14 @@ static album_art g_art;
 static bool g_art_hidden;
 
 /* Which view the bottom screen is showing. */
-typedef enum { VIEW_PLAYER = 0, VIEW_LIST, VIEW_TRACKS, VIEW_LYRICS } bottom_view;
+typedef enum {
+	VIEW_PLAYER = 0,
+	VIEW_LIST,
+	VIEW_TRACKS,
+	VIEW_LYRICS,
+	VIEW_DEVICES,
+	VIEW_SEARCH
+} bottom_view;
 static bottom_view g_view;
 static bottom_view g_tracks_return_view = VIEW_LIST;
 static float       g_list_scroll;
@@ -112,6 +121,19 @@ static float                  g_lyrics_scroll;
 static float                  g_lyrics_velocity;
 static char                   g_lyrics_req_uri[128];
 static u64                    g_lyrics_manual_until;
+
+/* Device picker state: the available-devices snapshot and the chosen target's
+ * id (for the player chip's label lookup). */
+static device_list            g_devices_buf;
+static char                   g_target_id[128];
+static u64                    g_devices_open_at; /* for the "Looking..." state */
+static worker_update_snapshot g_update_buf;
+
+/* Search view. */
+static worker_search_snapshot g_search_buf;
+static char                   g_search_query[64];
+static float                  g_search_scroll;
+static float                  g_search_velocity;
 /* Present the lyrics on the top screen as a hovering 3D stack. Independent of
  * g_view, so it can be on while the bottom screen shows the player controls or
  * the flat lyrics list. */
@@ -341,6 +363,37 @@ static void library_edit_search(void)
 	snprintf(g_list_search, sizeof g_list_search, "%s", start);
 	g_filter_query[0] = '\0';
 	library_reset_position();
+}
+
+/* Open the system keyboard for a Spotify track search and request it. Returns
+ * true when a non-empty query was entered. */
+static bool search_edit_query(void)
+{
+	SwkbdState keyboard;
+	char       query[sizeof g_search_query];
+	snprintf(query, sizeof query, "%s", g_search_query);
+	swkbdInit(&keyboard, SWKBD_TYPE_NORMAL, 2, (int)sizeof query - 1);
+	swkbdSetHintText(&keyboard, "Search Spotify");
+	swkbdSetInitialText(&keyboard, query);
+	swkbdSetButton(&keyboard, SWKBD_BUTTON_LEFT, "Cancel", false);
+	swkbdSetButton(&keyboard, SWKBD_BUTTON_RIGHT, "Search", true);
+	if (swkbdInputText(&keyboard, query, sizeof query) != SWKBD_BUTTON_RIGHT)
+		return false;
+
+	char *start = query;
+	while (*start && isspace((unsigned char)*start))
+		start++;
+	char *end = start + strlen(start);
+	while (end > start && isspace((unsigned char)end[-1]))
+		*--end = '\0';
+	if (!start[0])
+		return false;
+
+	snprintf(g_search_query, sizeof g_search_query, "%s", start);
+	worker_request_search(g_search_query);
+	g_search_scroll = 0.0f;
+	g_search_velocity = 0.0f;
+	return true;
 }
 
 static const collection_item *list_selected_item(int id, const recent_list *rl,
@@ -1216,6 +1269,88 @@ int main(int argc, char **argv)
 		if (input_view == VIEW_PLAYER && touch.clicked == BTN_LYRICS_3D)
 			g_top_lyrics = !g_top_lyrics;
 
+		if (input_view == VIEW_PLAYER && touch.clicked == BTN_DEVICE) {
+			g_view = VIEW_DEVICES;
+			worker_request_devices();
+			g_devices_open_at = osGetTime();
+		}
+
+		if (input_view == VIEW_DEVICES) {
+			worker_get_devices(&g_devices_buf);
+			if ((keys_down & KEY_B) || touch.clicked == DEVICE_BTN_BACK) {
+				g_view = VIEW_PLAYER;
+			} else if (touch.clicked == DEVICE_BTN_REFRESH) {
+				worker_request_devices();
+				g_devices_open_at = osGetTime();
+			} else if (touch.clicked == DEVICE_BTN_UPDATE) {
+				worker_start_update();
+			} else if (touch.clicked >= DEVICE_ROW0 &&
+			           touch.clicked < DEVICE_ROW0 + g_devices_buf.count) {
+				/* Choose where playback starts, then return to pick something. */
+				worker_set_target_device(
+				    g_devices_buf.items[touch.clicked - DEVICE_ROW0].id);
+				g_view = VIEW_PLAYER;
+			}
+		}
+
+		if (input_view == VIEW_PLAYER && touch.clicked == BTN_SEARCH) {
+			if (search_edit_query())
+				g_view = VIEW_SEARCH;
+		}
+
+		if (input_view == VIEW_SEARCH) {
+			worker_get_search(&g_search_buf);
+
+			if ((keys_down & KEY_B) || touch.clicked == SEARCH_BTN_BACK) {
+				g_view = VIEW_PLAYER;
+			} else if (touch.clicked == SEARCH_BTN_EDIT || (keys_down & KEY_Y)) {
+				search_edit_query();
+			} else if (touch.clicked >= SEARCH_ROW0 &&
+			           touch.clicked <
+			               SEARCH_ROW0 + g_search_buf.results.count) {
+				const track_item *it =
+				    &g_search_buf.results.items[touch.clicked - SEARCH_ROW0];
+				if (it->playable && it->uri[0]) {
+					worker_play_track(it->uri);
+					opt_set(&g_opt_play, 1);
+				}
+			}
+
+			/* Scroll: drag + fling + D-pad. */
+			if (touch.pressed)
+				g_search_velocity = 0.0f;
+			if (touch.down && touch.dragging) {
+				const float delta = -(float)touch.dy;
+				g_search_scroll += delta;
+				g_search_velocity = g_search_velocity * 0.25f + delta * 0.75f;
+				if (g_search_velocity > LIST_FLING_MAX)
+					g_search_velocity = LIST_FLING_MAX;
+				if (g_search_velocity < -LIST_FLING_MAX)
+					g_search_velocity = -LIST_FLING_MAX;
+			} else if (!touch.down) {
+				g_search_scroll += g_search_velocity;
+				g_search_velocity *= LIST_FLING_FRICTION;
+				if (g_search_velocity > -LIST_FLING_STOP &&
+				    g_search_velocity < LIST_FLING_STOP)
+					g_search_velocity = 0.0f;
+			}
+			const u32 nav = keys_repeat & (KEY_UP | KEY_DOWN);
+			if (nav)
+				g_search_scroll += (nav & KEY_UP) ? -LYRICS_SCROLL_STEP
+				                                  : LYRICS_SCROLL_STEP;
+
+			const float maxs =
+			    screen_search_max_scroll(g_search_buf.results.count);
+			if (g_search_scroll < 0.0f) {
+				g_search_scroll = 0.0f;
+				g_search_velocity = 0.0f;
+			}
+			if (g_search_scroll > maxs) {
+				g_search_scroll = maxs;
+				g_search_velocity = 0.0f;
+			}
+		}
+
 		if (input_view == VIEW_LYRICS) {
 			worker_get_lyrics(&g_lyrics_buf);
 
@@ -1931,7 +2066,53 @@ int main(int argc, char **argv)
 				.pressed_id = touch.down ? touch.press_id : -1,
 			};
 			screen_lyrics_draw(&la);
+		} else if (g_view == VIEW_DEVICES) {
+			worker_get_devices(&g_devices_buf);
+			worker_get_target_device(g_target_id, sizeof g_target_id);
+			worker_get_update(&g_update_buf);
+			const screen_devices_args da = {
+				.buf        = textbuf,
+				.tb         = &g_tb,
+				.devices    = &g_devices_buf,
+				.target_id  = g_target_id,
+				.active_id  = snap.have_state ? snap.state.device_id : "",
+				.loading    = g_devices_buf.count == 0 &&
+				              osGetTime() - g_devices_open_at < 2500,
+				.update_stage = g_update_buf.stage,
+				.update_msg   = g_update_buf.message,
+				.pressed_id = touch.down ? touch.press_id : -1,
+			};
+			screen_devices_draw(&da);
+		} else if (g_view == VIEW_SEARCH) {
+			worker_get_search(&g_search_buf);
+			const screen_search_args sa = {
+				.buf               = textbuf,
+				.tb                = &g_tb,
+				.results           = &g_search_buf.results,
+				.current_track_uri = snap.have_state ? snap.state.track_uri : "",
+				.error    = g_search_buf.error[0] ? g_search_buf.error : NULL,
+				.loading  = g_search_buf.state == SEARCH_LOADING,
+				.scroll   = g_search_scroll,
+				.pressed_id = touch.down ? touch.press_id : -1,
+			};
+			screen_search_draw(&sa);
 		} else {
+			/* Chip shows where audio is (active device) or, when idle, the
+			 * chosen target's name looked up from the device list. */
+			const char *chip_dev = NULL;
+			if (snap.have_state && snap.state.device_name[0]) {
+				chip_dev = snap.state.device_name;
+			} else {
+				worker_get_target_device(g_target_id, sizeof g_target_id);
+				if (g_target_id[0]) {
+					worker_get_devices(&g_devices_buf);
+					for (int i = 0; i < g_devices_buf.count; i++)
+						if (strcmp(g_devices_buf.items[i].id, g_target_id) == 0) {
+							chip_dev = g_devices_buf.items[i].name;
+							break;
+						}
+				}
+			}
 			screen_player_args pa = {
 				.buf         = textbuf,
 				.tb          = &g_tb,
@@ -1943,6 +2124,7 @@ int main(int argc, char **argv)
 				.pressed_id  = touch.down ? touch.press_id : -1,
 				.scrubbing   = g_scrub == SCRUB_DRAGGING,
 				.top_lyrics  = g_top_lyrics,
+				.device      = chip_dev,
 				.animation_ms = (unsigned)osGetTime(),
 			};
 

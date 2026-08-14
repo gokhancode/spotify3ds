@@ -69,6 +69,32 @@ static player_result api_call(const char *method, const char *path,
 	return status_to_result(resp->status);
 }
 
+/* Percent-encode a device id for a query parameter. out needs up to 3x the id
+ * length plus a NUL. */
+static void enc_device(const char *device_id, char *out, size_t outlen)
+{
+	static const char hex[] = "0123456789ABCDEF";
+	char       *dst = out;
+	const char *const end = out + outlen - 1;
+	for (const unsigned char *src = (const unsigned char *)device_id;
+	     *src && dst < end; src++) {
+		const bool plain = (*src >= 'a' && *src <= 'z') ||
+		                   (*src >= 'A' && *src <= 'Z') ||
+		                   (*src >= '0' && *src <= '9') || *src == '-' ||
+		                   *src == '_' || *src == '.' || *src == '~';
+		if (plain) {
+			*dst++ = (char)*src;
+		} else {
+			if (end - dst < 3)
+				break;
+			*dst++ = '%';
+			*dst++ = hex[*src >> 4];
+			*dst++ = hex[*src & 15];
+		}
+	}
+	*dst = '\0';
+}
+
 player_result player_poll(player_state *out, char *err, int errlen)
 {
 	memset(out, 0, sizeof *out);
@@ -137,6 +163,94 @@ player_result player_poll(player_state *out, char *err, int errlen)
 		return PLAYER_NOTHING_PLAYING;
 
 	return PLAYER_OK;
+}
+
+player_result player_devices(device_list *out, char *err, int errlen)
+{
+	memset(out, 0, sizeof *out);
+
+	http_response r;
+	player_result pr =
+	    api_call("GET", "/v1/me/player/devices", NULL, NULL, &r, err, errlen);
+	if (pr != PLAYER_OK) {
+		if (pr == PLAYER_ERROR)
+			snprintf(err, errlen, "devices failed");
+		return pr;
+	}
+	if (r.status != 200 || !r.body || !r.body_len) {
+		http_free(&r); /* no devices is a valid, empty result */
+		return PLAYER_OK;
+	}
+
+	int       needed = 0;
+	json_doc *d = json_doc_parse(r.body, r.body_len, &needed);
+	if (!d) {
+		snprintf(err, errlen, "devices parse failed");
+		http_free(&r);
+		return PLAYER_ERROR;
+	}
+
+	int count = json_doc_array_size(d, "devices");
+	if (count < 0)
+		count = 0;
+	if (count > DEVICES_MAX)
+		count = DEVICES_MAX;
+	out->count = count;
+
+	for (int i = 0; i < count; i++) {
+		device_item *it = &out->items[i];
+		char base[24], field[48];
+		snprintf(base, sizeof base, "devices[%d]", i);
+
+		snprintf(field, sizeof field, "%s.id", base);
+		json_doc_str(d, field, it->id, sizeof it->id);
+		snprintf(field, sizeof field, "%s.name", base);
+		json_doc_str(d, field, it->name, sizeof it->name);
+		snprintf(field, sizeof field, "%s.type", base);
+		json_doc_str(d, field, it->type, sizeof it->type);
+
+		bool b = false;
+		snprintf(field, sizeof field, "%s.is_active", base);
+		if (json_doc_bool(d, field, &b))
+			it->is_active = b;
+		snprintf(field, sizeof field, "%s.is_restricted", base);
+		if (json_doc_bool(d, field, &b))
+			it->is_restricted = b;
+		snprintf(field, sizeof field, "%s.supports_volume", base);
+		if (json_doc_bool(d, field, &b))
+			it->supports_volume = b;
+
+		long v = 0;
+		snprintf(field, sizeof field, "%s.volume_percent", base);
+		it->volume_known = json_doc_int(d, field, &v);
+		if (it->volume_known)
+			it->volume_percent = v;
+	}
+
+	json_doc_free(d);
+	http_free(&r);
+	return PLAYER_OK;
+}
+
+player_result player_transfer(const char *device_id, bool play, char *err,
+                              int errlen)
+{
+	if (!device_id || !device_id[0]) {
+		snprintf(err, errlen, "no device");
+		return PLAYER_ERROR;
+	}
+	/* The id goes in the JSON body here (base62, no escaping needed). */
+	char body[192];
+	snprintf(body, sizeof body, "{\"device_ids\":[\"%s\"],\"play\":%s}",
+	         device_id, play ? "true" : "false");
+
+	http_response r;
+	const player_result pr =
+	    api_call("PUT", "/v1/me/player", "application/json", body, &r, err,
+	             errlen);
+	if (pr == PLAYER_OK || r.body)
+		http_free(&r);
+	return pr;
 }
 
 /* The control endpoints take no body, but Spotify rejects a PUT that omits
@@ -266,14 +380,27 @@ repeat_mode repeat_next(repeat_mode m)
 	}
 }
 
-player_result player_play_context(const char *context_uri, char *err,
-                                  int errlen)
+/* Build "/v1/me/player/play", targeting device_id when one is given. */
+static void play_path(const char *device_id, char *path, size_t pathlen)
 {
-	return player_play_context_at(context_uri, -1, err, errlen);
+	if (device_id && device_id[0]) {
+		char enc[sizeof ((device_item *)0)->id * 3];
+		enc_device(device_id, enc, sizeof enc);
+		snprintf(path, pathlen, "/v1/me/player/play?device_id=%s", enc);
+	} else {
+		snprintf(path, pathlen, "/v1/me/player/play");
+	}
+}
+
+player_result player_play_context(const char *context_uri,
+                                  const char *device_id, char *err, int errlen)
+{
+	return player_play_context_at(context_uri, -1, device_id, err, errlen);
 }
 
 player_result player_play_context_at(const char *context_uri, int position,
-                                     char *err, int errlen)
+                                     const char *device_id, char *err,
+                                     int errlen)
 {
 	if (!context_uri || !context_uri[0]) {
 		snprintf(err, errlen, "no context uri");
@@ -289,16 +416,20 @@ player_result player_play_context_at(const char *context_uri, int position,
 	else
 		snprintf(body, sizeof body, "{\"context_uri\":\"%s\"}", context_uri);
 
+	char path[160];
+	play_path(device_id, path, sizeof path);
+
 	http_response r;
-	const player_result pr = api_call("PUT", "/v1/me/player/play",
-	                                  "application/json", body, &r, err, errlen);
+	const player_result pr =
+	    api_call("PUT", path, "application/json", body, &r, err, errlen);
 	if (pr == PLAYER_OK || r.body)
 		http_free(&r);
 	return pr;
 }
 
 player_result player_play_context_item(const char *context_uri,
-                                       const char *item_uri, char *err,
+                                       const char *item_uri,
+                                       const char *device_id, char *err,
                                        int errlen)
 {
 	if (!context_uri || !context_uri[0] || !item_uri || !item_uri[0]) {
@@ -312,9 +443,34 @@ player_result player_play_context_item(const char *context_uri,
 	         "\"position_ms\":0}",
 	         context_uri, item_uri);
 
+	char path[160];
+	play_path(device_id, path, sizeof path);
+
 	http_response r;
-	const player_result pr = api_call("PUT", "/v1/me/player/play",
-	                                  "application/json", body, &r, err, errlen);
+	const player_result pr =
+	    api_call("PUT", path, "application/json", body, &r, err, errlen);
+	if (pr == PLAYER_OK || r.body)
+		http_free(&r);
+	return pr;
+}
+
+player_result player_play_track(const char *track_uri, const char *device_id,
+                                char *err, int errlen)
+{
+	if (!track_uri || !track_uri[0]) {
+		snprintf(err, errlen, "no track uri");
+		return PLAYER_ERROR;
+	}
+
+	char body[192];
+	snprintf(body, sizeof body, "{\"uris\":[\"%s\"]}", track_uri);
+
+	char path[160];
+	play_path(device_id, path, sizeof path);
+
+	http_response r;
+	const player_result pr =
+	    api_call("PUT", path, "application/json", body, &r, err, errlen);
 	if (pr == PLAYER_OK || r.body)
 		http_free(&r);
 	return pr;

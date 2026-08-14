@@ -24,6 +24,8 @@ enum {
 	BTN_SHELF_ALL,
 	BTN_LYRICS,    /* open the lyrics list on the bottom screen */
 	BTN_LYRICS_3D, /* toggle the hovering lyrics on the top screen */
+	BTN_DEVICE,    /* open the device picker */
+	BTN_SEARCH,    /* open Spotify track search */
 	BTN_SHELF0,    /* .. BTN_SHELF0 + SHELF_TILES - 1 */
 };
 
@@ -44,7 +46,8 @@ typedef struct {
 	 * a pressed appearance. */
 	int  pressed_id;
 	bool scrubbing;
-	bool top_lyrics; /* the top-screen 3D lyrics overlay is currently on */
+	bool top_lyrics;      /* the top-screen 3D lyrics overlay is currently on */
+	const char *device;   /* target/active device name for the chip, or NULL */
 
 	/* Shelf art, NULL where not yet loaded. */
 	const C2D_Image *shelf[SHELF_TILES];

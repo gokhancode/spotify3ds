@@ -7,11 +7,11 @@
 #define BOT_W 320.0f
 #define BOT_H 240.0f
 
-/* Shelf */
+/* Shelf (nudged down to clear the top strip of chips) */
 #define SHELF_LABEL_X 16.0f
-#define SHELF_LABEL_Y 26.0f
+#define SHELF_LABEL_Y 44.0f
 #define SHELF_X       16.0f
-#define SHELF_Y       42.0f
+#define SHELF_Y       58.0f
 #define TILE          52.0f
 #define TILE_GAP      7.0f
 
@@ -40,9 +40,9 @@
  * actually makes the tap feel like it landed. */
 #define CLR_PRESS_HALO C2D_Color32(0x1D, 0xB9, 0x54, 0x33)
 
-/* Lyrics entry pills, in the band between the shelf and the transport row. */
-#define ACTROW_Y      104.0f
-#define ACTROW_H      24.0f
+/* Lyrics entry pills, tucked into the top-right corner. */
+#define PILL_Y        13.0f
+#define PILL_H        20.0f
 #define CLR_PILL      C2D_Color32(0x22, 0x22, 0x22, 0xFF)
 #define CLR_PILL_PR   C2D_Color32(0x30, 0x30, 0x30, 0xFF)
 #define CLR_GREEN_PR  C2D_Color32(0x28, 0xD8, 0x68, 0xFF)
@@ -63,39 +63,81 @@ static void rounded_rect(float x, float y, float w, float h, float r, u32 clr)
 	ui_disc(x + w - r, y + h - r, r, clr);
 }
 
-/* LYRICS opens the bottom-screen list; 3D toggles the top-screen overlay. Drawn
- * as a centred pair so the two lyrics surfaces are discoverable from the player
- * rather than hidden behind a button chord. */
+/* LYRICS opens the bottom-screen list; 3D toggles the top-screen overlay. Sat
+ * in the top-right corner so the two lyrics surfaces are discoverable from the
+ * player without crowding the transport or the shelf. */
 static void draw_lyrics_pills(const screen_player_args *a)
 {
-	const float pad = 12.0f, gap = 8.0f;
+	const float pad = 9.0f, gap = 6.0f;
 	const float lyr_tw = ui_text_width(a->buf, "LYRICS", TY_ROW_SUB);
 	const float td_tw  = ui_text_width(a->buf, "3D", TY_ROW_SUB);
 	const float lyr_w  = lyr_tw + 2.0f * pad;
 	const float td_w   = td_tw + 2.0f * pad;
-	const float x0     = (BOT_W - (lyr_w + gap + td_w)) / 2.0f;
+	const float srch_w = PILL_H + 2.0f; /* square-ish magnifier button */
+	const float td_x   = BOT_W - 10.0f - td_w;
+	const float lyr_x  = td_x - gap - lyr_w;
+	const float srch_x = lyr_x - gap - srch_w;
 	const float base   = ui_baseline(
-        ACTROW_Y + (ACTROW_H - ui_px(TY_ROW_SUB)) / 2.0f, TY_ROW_SUB);
+        PILL_Y + (PILL_H - ui_px(TY_ROW_SUB)) / 2.0f, TY_ROW_SUB);
+
+	/* Search: magnifier icon (a hollow ring plus a short handle). */
+	const bool srch_pr = a->pressed_id == BTN_SEARCH;
+	const u32  srch_bg = srch_pr ? CLR_PILL_PR : CLR_PILL;
+	const u32  srch_fg = srch_pr ? CLR_GREEN : CLR_WHITE;
+	rounded_rect(srch_x, PILL_Y, srch_w, PILL_H, PILL_H / 2.0f, srch_bg);
+	const float icx = srch_x + srch_w / 2.0f - 1.0f;
+	const float icy = PILL_Y + PILL_H / 2.0f - 1.0f;
+	ui_disc(icx, icy, 4.0f, srch_fg);
+	ui_disc(icx, icy, 2.5f, srch_bg);
+	C2D_DrawLine(icx + 2.5f, icy + 2.5f, srch_fg, icx + 5.0f, icy + 5.0f,
+	             srch_fg, 2.0f, 0.0f);
+	tb_add(a->tb, srch_x - 4.0f, PILL_Y - 6.0f, srch_w + 8.0f, PILL_H + 12.0f,
+	       BTN_SEARCH);
 
 	const bool lyr_pr = a->pressed_id == BTN_LYRICS;
-	rounded_rect(x0, ACTROW_Y, lyr_w, ACTROW_H, ACTROW_H / 2.0f,
+	rounded_rect(lyr_x, PILL_Y, lyr_w, PILL_H, PILL_H / 2.0f,
 	             lyr_pr ? CLR_PILL_PR : CLR_PILL);
-	ui_text(a->buf, "LYRICS", x0 + pad, base, TY_ROW_SUB, lyr_tw + 2.0f,
+	ui_text(a->buf, "LYRICS", lyr_x + pad, base, TY_ROW_SUB, lyr_tw + 2.0f,
 	        lyr_pr ? CLR_GREEN : CLR_WHITE);
-	tb_add(a->tb, x0 - 6.0f, ACTROW_Y - 6.0f, lyr_w + 12.0f, ACTROW_H + 12.0f,
+	tb_add(a->tb, lyr_x - 4.0f, PILL_Y - 6.0f, lyr_w + 8.0f, PILL_H + 12.0f,
 	       BTN_LYRICS);
 
-	const float tx = x0 + lyr_w + gap;
 	const bool td_pr = a->pressed_id == BTN_LYRICS_3D;
 	const u32 td_bg = a->top_lyrics ? (td_pr ? CLR_GREEN_PR : CLR_GREEN)
 	                  : td_pr       ? CLR_PILL_PR
 	                                : CLR_PILL;
-	rounded_rect(tx, ACTROW_Y, td_w, ACTROW_H, ACTROW_H / 2.0f, td_bg);
-	ui_text(a->buf, "3D", tx + pad, base, TY_ROW_SUB, td_tw + 2.0f,
+	rounded_rect(td_x, PILL_Y, td_w, PILL_H, PILL_H / 2.0f, td_bg);
+	ui_text(a->buf, "3D", td_x + pad, base, TY_ROW_SUB, td_tw + 2.0f,
 	        a->top_lyrics ? CLR_DARK_TXT : CLR_WHITE);
-	tb_add(a->tb, tx - 6.0f, ACTROW_Y - 6.0f, td_w + 12.0f, ACTROW_H + 12.0f,
+	tb_add(a->tb, td_x - 4.0f, PILL_Y - 6.0f, td_w + 8.0f, PILL_H + 12.0f,
 	       BTN_LYRICS_3D);
 }
+
+/* Top-left chip showing where playback will go, opening the device picker. A
+ * green dot means a device is targeted; grey means none is available yet. */
+static void draw_device_chip(const screen_player_args *a)
+{
+	const bool  have = a->device && a->device[0];
+	const char *name = have ? a->device : "No device";
+	const float pad = 9.0f, icon = 6.0f, gap = 6.0f, maxname = 78.0f;
+	float       nw = ui_text_width(a->buf, name, TY_ROW_SUB);
+	if (nw > maxname)
+		nw = maxname;
+	const float w = pad + icon + gap + nw + pad;
+	const float x = 10.0f;
+	const bool  pr = a->pressed_id == BTN_DEVICE;
+
+	rounded_rect(x, PILL_Y, w, PILL_H, PILL_H / 2.0f,
+	             pr ? CLR_PILL_PR : CLR_PILL);
+	ui_disc(x + pad + icon / 2.0f, PILL_Y + PILL_H / 2.0f, 3.0f,
+	        have ? CLR_GREEN : CLR_IDLE);
+	const float base =
+	    ui_baseline(PILL_Y + (PILL_H - ui_px(TY_ROW_SUB)) / 2.0f, TY_ROW_SUB);
+	ui_text(a->buf, name, x + pad + icon + gap, base, TY_ROW_SUB, maxname,
+	        pr ? CLR_GREEN : CLR_WHITE);
+	tb_add(a->tb, x - 2.0f, PILL_Y - 6.0f, w + 6.0f, PILL_H + 12.0f, BTN_DEVICE);
+}
+
 
 static void press_halo(float cx, float cy, bool pressed)
 {
@@ -379,7 +421,8 @@ void screen_player_draw(const screen_player_args *a)
 	if (a->repeat != REPEAT_OFF)
 		ui_disc(rep_x, ROW_Y + 12.0f, 1.5f, CLR_GREEN);
 
-	/* --- lyrics entry -------------------------------------------------- */
+	/* --- top strip: device chip (left); search + lyrics pills (right) -- */
+	draw_device_chip(a);
 	draw_lyrics_pills(a);
 
 	/* --- scrubber ------------------------------------------------------ */

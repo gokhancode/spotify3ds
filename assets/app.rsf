@@ -108,6 +108,7 @@ AccessControlInfo:
 
   ServiceAccessControl:
     - APT:U
+    - am:net
     - ac:u
     - cfg:u
     - fs:USER
